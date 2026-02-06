@@ -24,7 +24,7 @@ An MCP (Model Context Protocol) server that connects Claude to Canvas LMS, letti
 
 ```bash
 # Clone this repository
-git clone https://github.com/YOUR_USERNAME/canvas-mcp.git
+git clone https://github.com/lucanardinocchi/canvas-mcp.git
 cd canvas-mcp
 
 # Install dependencies
