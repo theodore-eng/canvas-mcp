@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getCanvasClient } from '../canvas-client.js';
+import { formatError, formatSuccess } from '../utils.js';
 
 export function registerSubmissionTools(server: McpServer) {
   const client = getCanvasClient();
@@ -66,20 +67,9 @@ export function registerSubmissionTools(server: McpServer) {
           }));
         }
 
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify(result, null, 2),
-          }],
-        };
+        return formatSuccess(result);
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error getting submission: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        return formatError('getting submission', error);
       }
     }
   );
@@ -88,7 +78,7 @@ export function registerSubmissionTools(server: McpServer) {
   if (process.env.ENABLE_WRITE_TOOLS === 'true') {
     server.tool(
       'submit_assignment',
-      'Submit an assignment with text content or a URL',
+      'Submit an assignment with text content or a URL. WARNING: This actually submits to Canvas and is visible to your instructor. Only use when explicitly asked.',
       {
         course_id: z.number().describe('The Canvas course ID'),
         assignment_id: z.number().describe('The assignment ID'),
@@ -99,23 +89,13 @@ export function registerSubmissionTools(server: McpServer) {
       async ({ course_id, assignment_id, submission_type, body, url }) => {
         try {
           if (submission_type === 'online_text_entry' && !body) {
-            return {
-              content: [{
-                type: 'text',
-                text: 'Error: body is required for online_text_entry submissions',
-              }],
-              isError: true,
-            };
+            return formatError('submitting assignment',
+              new Error('body is required for online_text_entry submissions'));
           }
 
           if (submission_type === 'online_url' && !url) {
-            return {
-              content: [{
-                type: 'text',
-                text: 'Error: url is required for online_url submissions',
-              }],
-              isError: true,
-            };
+            return formatError('submitting assignment',
+              new Error('url is required for online_url submissions'));
           }
 
           const submission = await client.submitAssignment(course_id, assignment_id, {
@@ -124,40 +104,29 @@ export function registerSubmissionTools(server: McpServer) {
             url,
           });
 
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({
-                success: true,
-                message: 'Assignment submitted successfully',
-                submission: {
-                  id: submission.id,
-                  submitted_at: submission.submitted_at,
-                  attempt: submission.attempt,
-                  workflow_state: submission.workflow_state,
-                },
-              }, null, 2),
-            }],
-          };
+          return formatSuccess({
+            success: true,
+            message: 'Assignment submitted successfully',
+            submission: {
+              id: submission.id,
+              submitted_at: submission.submitted_at,
+              attempt: submission.attempt,
+              workflow_state: submission.workflow_state,
+            },
+          });
         } catch (error) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Error submitting assignment: ${error instanceof Error ? error.message : String(error)}`,
-            }],
-            isError: true,
-          };
+          return formatError('submitting assignment', error);
         }
       }
     );
 
     server.tool(
       'upload_file',
-      'Upload a file and optionally submit it for an assignment',
+      'Upload a file and optionally submit it for an assignment. WARNING: If submit_after_upload is true, this submits to Canvas.',
       {
         course_id: z.number().describe('The Canvas course ID'),
         assignment_id: z.number().describe('The assignment ID'),
-        file_name: z.string().describe('Name of the file to upload'),
+        file_name: z.string().min(1).describe('Name of the file to upload'),
         file_content: z.string().describe('Base64 encoded file content'),
         content_type: z.string().describe('MIME type of the file (e.g., application/pdf, text/plain)'),
         submit_after_upload: z.boolean().optional().default(true)
@@ -165,11 +134,19 @@ export function registerSubmissionTools(server: McpServer) {
       },
       async ({ course_id, assignment_id, file_name, file_content, content_type, submit_after_upload }) => {
         try {
-          const binaryString = atob(file_content);
-          const fileBuffer = new Uint8Array(binaryString.length);
-          for (let i = 0; i < binaryString.length; i++) {
-            fileBuffer[i] = binaryString.charCodeAt(i);
+          // Decode base64 with error handling
+          let fileBuffer: Uint8Array;
+          try {
+            const binaryString = atob(file_content);
+            fileBuffer = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+              fileBuffer[i] = binaryString.charCodeAt(i);
+            }
+          } catch {
+            return formatError('uploading file',
+              new Error('Invalid base64 file content'));
           }
+
           const fileSize = fileBuffer.length;
 
           const uploadInfo = await client.initiateFileUpload(
@@ -194,42 +171,26 @@ export function registerSubmissionTools(server: McpServer) {
               file_ids: [uploadResult.id],
             });
 
-            return {
-              content: [{
-                type: 'text',
-                text: JSON.stringify({
-                  success: true,
-                  message: 'File uploaded and assignment submitted successfully',
-                  file: { id: uploadResult.id, name: file_name },
-                  submission: {
-                    id: submission.id,
-                    submitted_at: submission.submitted_at,
-                    attempt: submission.attempt,
-                  },
-                }, null, 2),
-              }],
-            };
+            return formatSuccess({
+              success: true,
+              message: 'File uploaded and assignment submitted successfully',
+              file: { id: uploadResult.id, name: file_name },
+              submission: {
+                id: submission.id,
+                submitted_at: submission.submitted_at,
+                attempt: submission.attempt,
+              },
+            });
           }
 
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({
-                success: true,
-                message: 'File uploaded successfully (not submitted yet)',
-                file: { id: uploadResult.id, name: file_name },
-                note: 'Use submit_assignment with file_ids to submit this file',
-              }, null, 2),
-            }],
-          };
+          return formatSuccess({
+            success: true,
+            message: 'File uploaded successfully (not submitted yet)',
+            file: { id: uploadResult.id, name: file_name },
+            note: 'Use submit_assignment with file_ids to submit this file',
+          });
         } catch (error) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Error uploading file: ${error instanceof Error ? error.message : String(error)}`,
-            }],
-            isError: true,
-          };
+          return formatError('uploading file', error);
         }
       }
     );

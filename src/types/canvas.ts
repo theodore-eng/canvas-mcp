@@ -482,3 +482,116 @@ export interface ListCalendarEventsParams {
   all_events?: boolean;
   undated?: boolean;
 }
+
+// ==================== PLANNER ====================
+
+export interface PlannerItem {
+  context_type: string;
+  course_id: number;
+  plannable_id: number;
+  plannable_type: string;
+  plannable: {
+    id: number;
+    title?: string;
+    name?: string;
+    due_at?: string;
+    todo_date?: string;
+    points_possible?: number;
+    submission_types?: string[];
+    description?: string;
+    details?: string;
+    created_at?: string;
+    updated_at?: string;
+    course_id?: number | null;
+    user_id?: number;
+    workflow_state?: string;
+  };
+  planner_override: PlannerOverride | null;
+  submissions:
+    | false
+    | {
+        excused: boolean;
+        graded: boolean;
+        late: boolean;
+        missing: boolean;
+        needs_grading: boolean;
+        with_feedback: boolean;
+      };
+  html_url: string;
+  context_name?: string;
+  new_activity?: boolean;
+}
+
+export interface PlannerNote {
+  id: number;
+  title: string;
+  description: string;
+  user_id: number;
+  workflow_state: string;
+  course_id: number | null;
+  todo_date: string;
+  linked_object_type: string | null;
+  linked_object_id: number | null;
+  linked_object_html_url: string | null;
+  linked_object_url: string | null;
+}
+
+export interface PlannerOverride {
+  id: number;
+  plannable_type: string;
+  plannable_id: number;
+  user_id: number;
+  assignment_id: number | null;
+  workflow_state: string;
+  marked_complete: boolean;
+  dismissed: boolean;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+export interface ListPlannerItemsParams {
+  start_date?: string;
+  end_date?: string;
+  context_codes?: string[];
+  filter?: 'new_activity' | 'incomplete_items' | 'complete_items';
+}
+
+export interface ListPlannerNotesParams {
+  start_date?: string;
+  end_date?: string;
+  context_codes?: string[];
+}
+
+export interface CreatePlannerNoteParams {
+  title: string;
+  details?: string;
+  todo_date?: string;
+  course_id?: number;
+  linked_object_type?: 'announcement' | 'assignment' | 'discussion_topic' | 'wiki_page' | 'quiz';
+  linked_object_id?: number;
+}
+
+export interface CreatePlannerOverrideParams {
+  plannable_type: 'announcement' | 'assignment' | 'discussion_topic' | 'quiz' | 'wiki_page' | 'planner_note' | 'calendar_event' | 'assessment_request';
+  plannable_id: number;
+  marked_complete?: boolean;
+  dismissed?: boolean;
+}
+
+// ==================== USER PROFILE ====================
+
+export interface UserProfile {
+  id: number;
+  name: string;
+  sortable_name: string;
+  short_name: string;
+  login_id: string;
+  avatar_url: string;
+  title: string | null;
+  bio: string | null;
+  primary_email: string;
+  time_zone: string;
+  locale: string | null;
+  calendar?: CalendarLink;
+}

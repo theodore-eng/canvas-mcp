@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getCanvasClient } from '../canvas-client.js';
+import { formatError, formatSuccess } from '../utils.js';
 
 export function registerSearchTools(server: McpServer) {
   const client = getCanvasClient();
@@ -19,13 +20,13 @@ export function registerSearchTools(server: McpServer) {
         const endDateObj = new Date(end_date);
 
         if (isNaN(startDateObj.getTime()) || isNaN(endDateObj.getTime())) {
-          return {
-            content: [{
-              type: 'text',
-              text: 'Error: Invalid date format. Please use ISO 8601 format (e.g., 2024-01-01)',
-            }],
-            isError: true,
-          };
+          return formatError('finding assignments',
+            new Error('Invalid date format. Please use ISO 8601 format (e.g., 2024-01-01)'));
+        }
+
+        if (startDateObj > endDateObj) {
+          return formatError('finding assignments',
+            new Error('start_date must be before end_date'));
         }
 
         const assignments = await client.getAssignmentsByDateRange(
@@ -44,24 +45,13 @@ export function registerSearchTools(server: McpServer) {
           html_url: a.html_url,
         }));
 
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              date_range: { start: start_date, end: end_date },
-              count: formattedAssignments.length,
-              assignments: formattedAssignments,
-            }, null, 2),
-          }],
-        };
+        return formatSuccess({
+          date_range: { start: start_date, end: end_date },
+          count: formattedAssignments.length,
+          assignments: formattedAssignments,
+        });
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error finding assignments: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        return formatError('finding assignments', error);
       }
     }
   );
@@ -95,24 +85,13 @@ export function registerSearchTools(server: McpServer) {
           return new Date(a.due_at).getTime() - new Date(b.due_at).getTime();
         });
 
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              looking_ahead_days: days_ahead,
-              count: formattedAssignments.length,
-              assignments: formattedAssignments,
-            }, null, 2),
-          }],
-        };
+        return formatSuccess({
+          looking_ahead_days: days_ahead,
+          count: formattedAssignments.length,
+          assignments: formattedAssignments,
+        });
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error getting upcoming assignments: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        return formatError('getting upcoming assignments', error);
       }
     }
   );
@@ -139,23 +118,12 @@ export function registerSearchTools(server: McpServer) {
 
         formattedAssignments.sort((a, b) => (b.days_overdue || 0) - (a.days_overdue || 0));
 
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              count: formattedAssignments.length,
-              assignments: formattedAssignments,
-            }, null, 2),
-          }],
-        };
+        return formatSuccess({
+          count: formattedAssignments.length,
+          assignments: formattedAssignments,
+        });
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error getting overdue assignments: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        return formatError('getting overdue assignments', error);
       }
     }
   );
@@ -165,7 +133,7 @@ export function registerSearchTools(server: McpServer) {
     'Search through a course\'s modules and assignments by keyword',
     {
       course_id: z.number().describe('The Canvas course ID'),
-      search_term: z.string().describe('Search term to find in modules and assignments'),
+      search_term: z.string().min(1).describe('Search term to find in modules and assignments'),
     },
     async ({ course_id, search_term }) => {
       try {
@@ -194,20 +162,9 @@ export function registerSearchTools(server: McpServer) {
           })),
         };
 
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify(formattedResults, null, 2),
-          }],
-        };
+        return formatSuccess(formattedResults);
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error searching course content: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        return formatError('searching course content', error);
       }
     }
   );
@@ -226,7 +183,6 @@ export function registerSearchTools(server: McpServer) {
           state: ['available'],
         });
 
-        // Fetch assignments from all courses in parallel
         const results = await Promise.allSettled(
           courses.map(async (course) => {
             const assignments = await client.getUpcomingAssignments(course.id, days_ahead);
@@ -271,37 +227,25 @@ export function registerSearchTools(server: McpServer) {
               });
             }
           } else {
-            failedCourses.push(result.reason?.message ?? 'Unknown error');
+            failedCourses.push(String(result.reason));
           }
         }
 
-        // Sort by due date
         allAssignments.sort((a, b) => {
           if (!a.assignment.due_at) return 1;
           if (!b.assignment.due_at) return -1;
           return new Date(a.assignment.due_at).getTime() - new Date(b.assignment.due_at).getTime();
         });
 
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              looking_ahead_days: days_ahead,
-              total_count: allAssignments.length,
-              courses_checked: courses.length,
-              ...(failedCourses.length > 0 ? { courses_failed: failedCourses } : {}),
-              assignments: allAssignments,
-            }, null, 2),
-          }],
-        };
+        return formatSuccess({
+          looking_ahead_days: days_ahead,
+          total_count: allAssignments.length,
+          courses_checked: courses.length,
+          ...(failedCourses.length > 0 ? { courses_failed: failedCourses } : {}),
+          assignments: allAssignments,
+        });
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error getting upcoming work: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        return formatError('getting upcoming work', error);
       }
     }
   );

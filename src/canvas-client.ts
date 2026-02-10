@@ -11,6 +11,10 @@ import type {
   Page,
   CalendarEvent,
   TodoItem,
+  PlannerItem,
+  PlannerNote,
+  PlannerOverride,
+  UserProfile,
   FileUploadResponse,
   ListCoursesParams,
   ListAssignmentsParams,
@@ -19,6 +23,10 @@ import type {
   ListFilesParams,
   ListPagesParams,
   ListCalendarEventsParams,
+  ListPlannerItemsParams,
+  ListPlannerNotesParams,
+  CreatePlannerNoteParams,
+  CreatePlannerOverrideParams,
   SubmitAssignmentParams,
   SubmissionType,
 } from './types/canvas.js';
@@ -443,6 +451,72 @@ export class CanvasClient {
 
   async getTodoItems(): Promise<TodoItem[]> {
     return this.requestPaginated<TodoItem>('/users/self/todo');
+  }
+
+  // ==================== PLANNER ====================
+
+  async listPlannerItems(
+    params: ListPlannerItemsParams = {}
+  ): Promise<PlannerItem[]> {
+    const query = this.buildQueryString(params);
+    return this.requestPaginated<PlannerItem>(`/planner/items${query}`);
+  }
+
+  async listPlannerNotes(
+    params: ListPlannerNotesParams = {}
+  ): Promise<PlannerNote[]> {
+    const query = this.buildQueryString(params);
+    return this.requestPaginated<PlannerNote>(`/planner_notes${query}`);
+  }
+
+  async createPlannerNote(
+    params: CreatePlannerNoteParams
+  ): Promise<PlannerNote> {
+    return this.request<PlannerNote>('/planner_notes', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  }
+
+  async updatePlannerNote(
+    noteId: number,
+    params: Partial<CreatePlannerNoteParams>
+  ): Promise<PlannerNote> {
+    return this.request<PlannerNote>(`/planner_notes/${noteId}`, {
+      method: 'PUT',
+      body: JSON.stringify(params),
+    });
+  }
+
+  async deletePlannerNote(noteId: number): Promise<PlannerNote> {
+    return this.request<PlannerNote>(`/planner_notes/${noteId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async createPlannerOverride(
+    params: CreatePlannerOverrideParams
+  ): Promise<PlannerOverride> {
+    return this.request<PlannerOverride>('/planner/overrides', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  }
+
+  async updatePlannerOverride(
+    overrideId: number,
+    params: { marked_complete?: boolean; dismissed?: boolean }
+  ): Promise<PlannerOverride> {
+    return this.request<PlannerOverride>(`/planner/overrides/${overrideId}`, {
+      method: 'PUT',
+      body: JSON.stringify(params),
+    });
+  }
+
+  // ==================== USER PROFILE ====================
+
+  async getUserProfile(): Promise<UserProfile> {
+    return this.request<UserProfile>('/users/self/profile');
   }
 
   // ==================== SEARCH / UTILITY ====================

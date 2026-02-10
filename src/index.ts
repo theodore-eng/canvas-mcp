@@ -19,6 +19,12 @@ import { registerTodoTools } from './tools/todos.js';
 import { registerPageTools } from './tools/pages.js';
 import { registerCalendarTools } from './tools/calendar.js';
 import { registerFileTools } from './tools/files.js';
+import { registerPlannerTools } from './tools/planner.js';
+import { registerDashboardTools } from './tools/dashboard.js';
+
+// Import prompt and resource registration
+import { registerPrompts } from './prompts.js';
+import { registerResources } from './resources.js';
 
 // Validate required environment variables
 function validateEnvironment(): void {
@@ -48,15 +54,15 @@ async function main(): Promise<void> {
   // Create the MCP server
   const server = new McpServer({
     name: 'canvas-lms',
-    version: '1.0.0',
+    version: '2.0.0',
   });
 
-  // Register all read tools (always active)
+  // ==================== TOOLS ====================
+
+  // Core read tools (always active)
   registerCourseTools(server);
   registerAssignmentTools(server);
-  registerSubmissionTools(server);     // write tools gated internally
   registerModuleTools(server);
-  registerDiscussionTools(server);     // write tools gated internally
   registerSearchTools(server);
   registerGradeTools(server);
   registerTodoTools(server);
@@ -64,17 +70,42 @@ async function main(): Promise<void> {
   registerCalendarTools(server);
   registerFileTools(server);
 
+  // Planner tools — read + safe personal writes (always active)
+  registerPlannerTools(server);
+
+  // Dashboard & profile tools (always active)
+  registerDashboardTools(server);
+
+  // Submission & discussion tools (write tools gated by ENABLE_WRITE_TOOLS)
+  registerSubmissionTools(server);
+  registerDiscussionTools(server);
+
+  // ==================== PROMPTS ====================
+  registerPrompts(server);
+
+  // ==================== RESOURCES ====================
+  registerResources(server);
+
   // Create stdio transport and connect
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
   // Log startup (to stderr to not interfere with MCP protocol on stdout)
-  console.error('Canvas LMS MCP Server started successfully');
+  console.error('Canvas LMS MCP Server v2.0.0 started successfully');
   console.error(`Connected to: ${process.env.CANVAS_BASE_URL}`);
+  console.error('');
+  console.error('Active features:');
+  console.error('  Tools:     courses, assignments, modules, search, grades, todos, pages,');
+  console.error('             calendar, files, planner, dashboard, profile');
+  console.error('  Prompts:   weekly_review, study_plan, assignment_helper, quick_check');
+  console.error('  Resources: canvas://grades/summary, canvas://courses/active,');
+  console.error('             canvas://courses/{id}/syllabus, canvas://courses/{id}/assignments');
+  console.error('');
+  console.error('Safe writes (always on): planner notes, mark items complete');
   if (process.env.ENABLE_WRITE_TOOLS === 'true') {
-    console.error('Write tools: ENABLED (submit_assignment, upload_file, post_discussion_entry, reply_to_discussion)');
+    console.error('Full writes:  ENABLED (submit_assignment, upload_file, post_discussion_entry, reply_to_discussion)');
   } else {
-    console.error('Write tools: DISABLED (set ENABLE_WRITE_TOOLS=true to enable)');
+    console.error('Full writes:  DISABLED (set ENABLE_WRITE_TOOLS=true to enable submissions & discussion posts)');
   }
 }
 

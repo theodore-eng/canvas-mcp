@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getCanvasClient } from '../canvas-client.js';
+import { formatError, formatSuccess, stripHtmlTags } from '../utils.js';
 
 export function registerPageTools(server: McpServer) {
   const client = getCanvasClient();
@@ -29,30 +30,19 @@ export function registerPageTools(server: McpServer) {
           front_page: page.front_page,
         }));
 
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              count: formattedPages.length,
-              pages: formattedPages,
-            }, null, 2),
-          }],
-        };
+        return formatSuccess({
+          count: formattedPages.length,
+          pages: formattedPages,
+        });
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error listing pages: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        return formatError('listing pages', error);
       }
     }
   );
 
   server.tool(
     'get_page_content',
-    'Read the full content of a course page. Returns the page body as HTML which can be summarized or searched.',
+    'Read the full content of a course page as clean text. Great for reading syllabi, lecture notes, and course info pages.',
     {
       course_id: z.number().describe('The Canvas course ID'),
       page_url: z.string().describe('The page URL slug (e.g., "syllabus" or "week-3-notes") or page ID'),
@@ -61,25 +51,14 @@ export function registerPageTools(server: McpServer) {
       try {
         const page = await client.getPage(course_id, page_url);
 
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              title: page.title,
-              url: page.url,
-              updated_at: page.updated_at,
-              body: page.body ?? '(empty page)',
-            }, null, 2),
-          }],
-        };
+        return formatSuccess({
+          title: page.title,
+          url: page.url,
+          updated_at: page.updated_at,
+          body: page.body ? stripHtmlTags(page.body) : '(empty page)',
+        });
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error getting page content: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        return formatError('getting page content', error);
       }
     }
   );

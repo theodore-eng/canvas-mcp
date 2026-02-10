@@ -1,6 +1,6 @@
-import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getCanvasClient } from '../canvas-client.js';
+import { formatError, formatSuccess } from '../utils.js';
 
 export function registerTodoTools(server: McpServer) {
   const client = getCanvasClient();
@@ -23,23 +23,12 @@ export function registerTodoTools(server: McpServer) {
           html_url: item.html_url,
         }));
 
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              count: formattedTodos.length,
-              items: formattedTodos,
-            }, null, 2),
-          }],
-        };
+        return formatSuccess({
+          count: formattedTodos.length,
+          items: formattedTodos,
+        });
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error getting todo items: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        return formatError('getting todo items', error);
       }
     }
   );

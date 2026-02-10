@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getCanvasClient } from '../canvas-client.js';
+import { formatError, formatSuccess, stripHtmlTags } from '../utils.js';
 
 export function registerCourseTools(server: McpServer) {
   const client = getCanvasClient();
@@ -39,23 +40,14 @@ export function registerCourseTools(server: McpServer) {
           start_date: course.start_at,
           end_date: course.end_at,
           default_view: course.default_view,
-          syllabus: include_syllabus ? course.syllabus_body : undefined,
+          syllabus: include_syllabus && course.syllabus_body
+            ? stripHtmlTags(course.syllabus_body)
+            : undefined,
         }));
 
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify(formattedCourses, null, 2),
-          }],
-        };
+        return formatSuccess(formattedCourses);
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error listing courses: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        return formatError('listing courses', error);
       }
     }
   );
@@ -88,23 +80,14 @@ export function registerCourseTools(server: McpServer) {
           time_zone: course.time_zone,
           default_view: course.default_view,
           public_description: course.public_description,
-          syllabus: course.syllabus_body,
+          syllabus: include_syllabus && course.syllabus_body
+            ? stripHtmlTags(course.syllabus_body)
+            : undefined,
         };
 
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify(formattedCourse, null, 2),
-          }],
-        };
+        return formatSuccess(formattedCourse);
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error getting course: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        return formatError('getting course', error);
       }
     }
   );

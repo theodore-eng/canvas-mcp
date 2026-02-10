@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getCanvasClient } from '../canvas-client.js';
+import { formatError, formatSuccess, stripHtmlTags } from '../utils.js';
 
 export function registerAssignmentTools(server: McpServer) {
   const client = getCanvasClient();
@@ -45,20 +46,9 @@ export function registerAssignmentTools(server: McpServer) {
           html_url: a.html_url,
         }));
 
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify(formattedAssignments, null, 2),
-          }],
-        };
+        return formatSuccess(formattedAssignments);
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error listing assignments: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        return formatError('listing assignments', error);
       }
     }
   );
@@ -81,7 +71,9 @@ export function registerAssignmentTools(server: McpServer) {
         const result: Record<string, unknown> = {
           id: assignment.id,
           name: assignment.name,
-          description: assignment.description,
+          description: assignment.description
+            ? stripHtmlTags(assignment.description)
+            : null,
           due_at: assignment.due_at,
           unlock_at: assignment.unlock_at,
           lock_at: assignment.lock_at,
@@ -124,20 +116,9 @@ export function registerAssignmentTools(server: McpServer) {
           };
         }
 
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify(result, null, 2),
-          }],
-        };
+        return formatSuccess(result);
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error getting assignment: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        return formatError('getting assignment', error);
       }
     }
   );
@@ -154,15 +135,12 @@ export function registerAssignmentTools(server: McpServer) {
         const assignment = await client.getAssignment(course_id, assignment_id);
 
         if (!assignment.rubric) {
-          return {
-            content: [{
-              type: 'text',
-              text: 'This assignment does not have a rubric.',
-            }],
-          };
+          return formatSuccess({
+            message: 'This assignment does not have a rubric.',
+          });
         }
 
-        const rubricInfo = {
+        return formatSuccess({
           settings: assignment.rubric_settings,
           use_for_grading: assignment.use_rubric_for_grading,
           total_points: assignment.rubric_settings?.points_possible,
@@ -177,22 +155,9 @@ export function registerAssignmentTools(server: McpServer) {
               points: rating.points,
             })),
           })),
-        };
-
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify(rubricInfo, null, 2),
-          }],
-        };
+        });
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error getting rubric: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        return formatError('getting rubric', error);
       }
     }
   );

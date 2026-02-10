@@ -1,13 +1,13 @@
-import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getCanvasClient } from '../canvas-client.js';
+import { formatError, formatSuccess } from '../utils.js';
 
 export function registerGradeTools(server: McpServer) {
   const client = getCanvasClient();
 
   server.tool(
     'get_my_grades',
-    'Get your current grades across all active courses',
+    'Get your current grades across all active courses. Shows current score, final score, and letter grades.',
     {},
     async () => {
       try {
@@ -20,36 +20,25 @@ export function registerGradeTools(server: McpServer) {
         const grades = courses
           .filter(course => course.enrollments && course.enrollments.length > 0)
           .map(course => {
-            const enrollment = course.enrollments![0];
+            const enrollment = course.enrollments?.[0];
             return {
               course_id: course.id,
               course_name: course.name,
               course_code: course.course_code,
               term: course.term?.name,
-              current_score: enrollment.computed_current_score ?? null,
-              current_grade: enrollment.computed_current_grade ?? null,
-              final_score: enrollment.computed_final_score ?? null,
-              final_grade: enrollment.computed_final_grade ?? null,
+              current_score: enrollment?.computed_current_score ?? null,
+              current_grade: enrollment?.computed_current_grade ?? null,
+              final_score: enrollment?.computed_final_score ?? null,
+              final_grade: enrollment?.computed_final_grade ?? null,
             };
           });
 
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              count: grades.length,
-              grades,
-            }, null, 2),
-          }],
-        };
+        return formatSuccess({
+          count: grades.length,
+          grades,
+        });
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error getting grades: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        return formatError('getting grades', error);
       }
     }
   );
@@ -133,24 +122,13 @@ export function registerGradeTools(server: McpServer) {
           .map((r, i) => r.status === 'rejected' ? courses[i].name : null)
           .filter(Boolean);
 
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              courses: courseResults,
-              total_missing: courseResults.reduce((sum, c) => sum + c.missing_count, 0),
-              ...(failedCourses.length > 0 ? { failed_courses: failedCourses } : {}),
-            }, null, 2),
-          }],
-        };
+        return formatSuccess({
+          courses: courseResults,
+          total_missing: courseResults.reduce((sum, c) => sum + c.missing_count, 0),
+          ...(failedCourses.length > 0 ? { failed_courses: failedCourses } : {}),
+        });
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error getting submission status: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        return formatError('getting submission status', error);
       }
     }
   );

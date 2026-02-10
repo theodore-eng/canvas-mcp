@@ -1,31 +1,14 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getCanvasClient } from '../canvas-client.js';
-
-// Reuse the PDF parser and HTML stripper from files.ts
-async function parsePdf(buffer: Buffer): Promise<{ text: string; numpages: number }> {
-  const { PDFParse } = await import('pdf-parse');
-  const parser = new PDFParse({ data: new Uint8Array(buffer) });
-  const result = await parser.getText();
-  const numpages = result.total;
-  await parser.destroy();
-  return { text: result.text, numpages };
-}
-
-function stripHtmlTags(html: string): string {
-  return html
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/\s+/g, ' ')
-    .trim();
-}
+import {
+  formatError,
+  formatSuccess,
+  formatFileSize,
+  extractTextFromFile,
+  stripHtmlTags,
+  MAX_FILE_SIZE,
+} from '../utils.js';
 
 export function registerModuleTools(server: McpServer) {
   const client = getCanvasClient();
@@ -75,20 +58,9 @@ export function registerModuleTools(server: McpServer) {
           })) : undefined,
         }));
 
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify(formattedModules, null, 2),
-          }],
-        };
+        return formatSuccess(formattedModules);
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error listing modules: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        return formatError('listing modules', error);
       }
     }
   );
@@ -119,7 +91,7 @@ export function registerModuleTools(server: McpServer) {
         const formattedAnnouncements = announcements.map(ann => ({
           id: ann.id,
           title: ann.title,
-          message: ann.message,
+          message: stripHtmlTags(ann.message),
           posted_at: ann.posted_at,
           author: ann.user_name,
           context_code: ann.context_code,
@@ -131,20 +103,9 @@ export function registerModuleTools(server: McpServer) {
           })),
         }));
 
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify(formattedAnnouncements, null, 2),
-          }],
-        };
+        return formatSuccess(formattedAnnouncements);
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error listing announcements: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        return formatError('listing announcements', error);
       }
     }
   );
@@ -163,13 +124,8 @@ export function registerModuleTools(server: McpServer) {
         const item = items.find(i => i.id === item_id);
 
         if (!item) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Module item with ID ${item_id} not found in module ${module_id}`,
-            }],
-            isError: true,
-          };
+          return formatError('getting module item content',
+            new Error(`Module item with ID ${item_id} not found in module ${module_id}`));
         }
 
         let contentResult: Record<string, unknown> = {
@@ -184,7 +140,7 @@ export function registerModuleTools(server: McpServer) {
               break;
             }
             const page = await client.getPage(course_id, item.page_url);
-            contentResult.content = page.body ?? '(empty page)';
+            contentResult.content = page.body ? stripHtmlTags(page.body) : '(empty page)';
             contentResult.updated_at = page.updated_at;
             break;
           }
@@ -197,32 +153,22 @@ export function registerModuleTools(server: McpServer) {
             const file = await client.getFile(item.content_id);
             const contentType = file['content-type'];
 
-            if (file.size > 25 * 1024 * 1024) {
+            if (file.size > MAX_FILE_SIZE) {
               contentResult.message = 'File too large for text extraction';
+              contentResult.file_name = file.display_name;
+              contentResult.size = formatFileSize(file.size);
               contentResult.url = file.url;
               break;
             }
 
-            if (
-              contentType === 'application/pdf' ||
-              contentType === 'text/html' ||
-              contentType === 'text/plain' ||
-              contentType === 'text/csv' ||
-              contentType === 'text/markdown' ||
-              contentType?.startsWith('text/')
-            ) {
-              const arrayBuffer = await client.downloadFile(file.url);
-              const buffer = Buffer.from(arrayBuffer);
+            const arrayBuffer = await client.downloadFile(file.url);
+            const buffer = Buffer.from(arrayBuffer);
+            const extracted = await extractTextFromFile(buffer, contentType);
 
-              if (contentType === 'application/pdf') {
-                const pdfData = await parsePdf(buffer);
-                contentResult.content = pdfData.text.substring(0, 50000);
-                contentResult.pages = pdfData.numpages;
-              } else if (contentType === 'text/html') {
-                contentResult.content = stripHtmlTags(buffer.toString('utf-8')).substring(0, 50000);
-              } else {
-                contentResult.content = buffer.toString('utf-8').substring(0, 50000);
-              }
+            if (extracted) {
+              contentResult.content = extracted.text;
+              if (extracted.pages !== undefined) contentResult.pages = extracted.pages;
+              if (extracted.truncated) contentResult.truncated = true;
             } else {
               contentResult.message = `Cannot extract text from ${contentType} files`;
               contentResult.file_name = file.display_name;
@@ -237,7 +183,9 @@ export function registerModuleTools(server: McpServer) {
               break;
             }
             const assignment = await client.getAssignment(course_id, item.content_id, ['submission']);
-            contentResult.description = assignment.description;
+            contentResult.description = assignment.description
+              ? stripHtmlTags(assignment.description)
+              : null;
             contentResult.due_at = assignment.due_at;
             contentResult.points_possible = assignment.points_possible;
             contentResult.submission_types = assignment.submission_types;
@@ -251,7 +199,7 @@ export function registerModuleTools(server: McpServer) {
               break;
             }
             const topic = await client.getDiscussionTopic(course_id, item.content_id);
-            contentResult.message = topic.message;
+            contentResult.message = topic.message ? stripHtmlTags(topic.message) : null;
             contentResult.author = topic.user_name;
             contentResult.posted_at = topic.posted_at;
             contentResult.reply_count = topic.discussion_subentry_count;
@@ -281,20 +229,9 @@ export function registerModuleTools(server: McpServer) {
           }
         }
 
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify(contentResult, null, 2),
-          }],
-        };
+        return formatSuccess(contentResult);
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error getting module item content: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        return formatError('getting module item content', error);
       }
     }
   );

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getCanvasClient } from '../canvas-client.js';
+import { formatError, formatSuccess, stripHtmlTags } from '../utils.js';
 
 export function registerCalendarTools(server: McpServer) {
   const client = getCanvasClient();
@@ -50,7 +51,7 @@ export function registerCalendarTools(server: McpServer) {
           all_day_date: event.all_day_date,
           location: event.location_name,
           context: event.context_name ?? event.context_code,
-          description: event.description,
+          description: event.description ? stripHtmlTags(event.description) : null,
           html_url: event.html_url,
         }));
 
@@ -61,23 +62,12 @@ export function registerCalendarTools(server: McpServer) {
           return new Date(a.start_at).getTime() - new Date(b.start_at).getTime();
         });
 
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              count: formattedEvents.length,
-              events: formattedEvents,
-            }, null, 2),
-          }],
-        };
+        return formatSuccess({
+          count: formattedEvents.length,
+          events: formattedEvents,
+        });
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error listing calendar events: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        return formatError('listing calendar events', error);
       }
     }
   );

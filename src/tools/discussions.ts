@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getCanvasClient } from '../canvas-client.js';
+import { formatError, formatSuccess, stripHtmlTags } from '../utils.js';
 
 export function registerDiscussionTools(server: McpServer) {
   const client = getCanvasClient();
@@ -21,7 +22,7 @@ export function registerDiscussionTools(server: McpServer) {
         const formattedTopics = topics.map(topic => ({
           id: topic.id,
           title: topic.title,
-          message: topic.message,
+          message: topic.message ? stripHtmlTags(topic.message) : null,
           posted_at: topic.posted_at,
           last_reply_at: topic.last_reply_at,
           author: topic.user_name,
@@ -36,20 +37,9 @@ export function registerDiscussionTools(server: McpServer) {
           html_url: topic.html_url,
         }));
 
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify(formattedTopics, null, 2),
-          }],
-        };
+        return formatSuccess(formattedTopics);
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error listing discussions: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        return formatError('listing discussions', error);
       }
     }
   );
@@ -70,7 +60,7 @@ export function registerDiscussionTools(server: McpServer) {
           topic: {
             id: topic.id,
             title: topic.title,
-            message: topic.message,
+            message: topic.message ? stripHtmlTags(topic.message) : null,
             author: topic.user_name,
             posted_at: topic.posted_at,
             require_initial_post: topic.require_initial_post,
@@ -78,33 +68,22 @@ export function registerDiscussionTools(server: McpServer) {
           entries: entries.map(entry => ({
             id: entry.id,
             user_name: entry.user_name,
-            message: entry.message,
+            message: entry.message ? stripHtmlTags(entry.message) : null,
             created_at: entry.created_at,
             read_state: entry.read_state,
             replies: entry.recent_replies?.map(reply => ({
               id: reply.id,
               user_name: reply.user_name,
-              message: reply.message,
+              message: reply.message ? stripHtmlTags(reply.message) : null,
               created_at: reply.created_at,
             })),
             has_more_replies: entry.has_more_replies,
           })),
         };
 
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify(result, null, 2),
-          }],
-        };
+        return formatSuccess(result);
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error getting discussion entries: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        return formatError('getting discussion entries', error);
       }
     }
   );
@@ -113,51 +92,40 @@ export function registerDiscussionTools(server: McpServer) {
   if (process.env.ENABLE_WRITE_TOOLS === 'true') {
     server.tool(
       'post_discussion_entry',
-      'Post a new entry to a discussion topic',
+      'Post a new entry to a discussion topic. This will be visible to your class. Only use when explicitly asked.',
       {
         course_id: z.number().describe('The Canvas course ID'),
         topic_id: z.number().describe('The discussion topic ID'),
-        message: z.string().describe('The message to post (supports HTML)'),
+        message: z.string().min(1).describe('The message to post (supports HTML)'),
       },
       async ({ course_id, topic_id, message }) => {
         try {
           const entry = await client.postDiscussionEntry(course_id, topic_id, message);
 
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({
-                success: true,
-                message: 'Discussion entry posted successfully',
-                entry: {
-                  id: entry.id,
-                  message: entry.message,
-                  created_at: entry.created_at,
-                  user_name: entry.user_name,
-                },
-              }, null, 2),
-            }],
-          };
+          return formatSuccess({
+            success: true,
+            message: 'Discussion entry posted successfully',
+            entry: {
+              id: entry.id,
+              message: entry.message,
+              created_at: entry.created_at,
+              user_name: entry.user_name,
+            },
+          });
         } catch (error) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Error posting discussion entry: ${error instanceof Error ? error.message : String(error)}`,
-            }],
-            isError: true,
-          };
+          return formatError('posting discussion entry', error);
         }
       }
     );
 
     server.tool(
       'reply_to_discussion',
-      'Reply to a specific post in a discussion topic',
+      'Reply to a specific post in a discussion topic. This will be visible to your class. Only use when explicitly asked.',
       {
         course_id: z.number().describe('The Canvas course ID'),
         topic_id: z.number().describe('The discussion topic ID'),
         entry_id: z.number().describe('The entry ID to reply to'),
-        message: z.string().describe('The reply message (supports HTML)'),
+        message: z.string().min(1).describe('The reply message (supports HTML)'),
       },
       async ({ course_id, topic_id, entry_id, message }) => {
         try {
@@ -168,29 +136,18 @@ export function registerDiscussionTools(server: McpServer) {
             message
           );
 
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({
-                success: true,
-                message: 'Reply posted successfully',
-                reply: {
-                  id: reply.id,
-                  message: reply.message,
-                  created_at: reply.created_at,
-                  user_name: reply.user_name,
-                },
-              }, null, 2),
-            }],
-          };
+          return formatSuccess({
+            success: true,
+            message: 'Reply posted successfully',
+            reply: {
+              id: reply.id,
+              message: reply.message,
+              created_at: reply.created_at,
+              user_name: reply.user_name,
+            },
+          });
         } catch (error) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Error posting reply: ${error instanceof Error ? error.message : String(error)}`,
-            }],
-            isError: true,
-          };
+          return formatError('posting reply', error);
         }
       }
     );
