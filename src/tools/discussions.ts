@@ -46,15 +46,33 @@ export function registerDiscussionTools(server: McpServer) {
 
   server.tool(
     'get_discussion_entries',
-    'Read the posts and replies in a discussion topic',
+    'Read the posts and replies in a discussion topic with pagination support. Returns entries sorted by date with offset/limit controls.',
     {
       course_id: z.number().int().positive().describe('The Canvas course ID'),
       topic_id: z.number().int().positive().describe('The discussion topic ID'),
+      limit: z.number().int().min(1).max(200).optional().default(50)
+        .describe('Maximum entries to return (default: 50, max: 200)'),
+      offset: z.number().int().min(0).optional().default(0)
+        .describe('Number of entries to skip for pagination (default: 0)'),
+      sort_order: z.enum(['asc', 'desc']).optional().default('desc')
+        .describe('Sort by date: "asc" for oldest first, "desc" for newest first (default: desc)'),
     },
-    async ({ course_id, topic_id }) => {
+    async ({ course_id, topic_id, limit, offset, sort_order }) => {
       try {
         const topic = await client.getDiscussionTopic(course_id, topic_id);
         const entries = await client.listDiscussionEntries(course_id, topic_id);
+
+        // Sort entries by created_at based on sort_order
+        const sortedEntries = [...entries].sort((a, b) => {
+          const dateA = new Date(a.created_at).getTime();
+          const dateB = new Date(b.created_at).getTime();
+          return sort_order === 'asc' ? dateA - dateB : dateB - dateA;
+        });
+
+        const totalEntries = sortedEntries.length;
+
+        // Apply pagination via offset and limit
+        const paginatedEntries = sortedEntries.slice(offset, offset + limit);
 
         const result = {
           topic: {
@@ -65,7 +83,14 @@ export function registerDiscussionTools(server: McpServer) {
             posted_at: topic.posted_at,
             require_initial_post: topic.require_initial_post,
           },
-          entries: entries.map(entry => ({
+          pagination: {
+            total_entries: totalEntries,
+            returned: paginatedEntries.length,
+            has_more: offset + limit < totalEntries,
+            offset,
+            limit,
+          },
+          entries: paginatedEntries.map(entry => ({
             id: entry.id,
             user_name: entry.user_name,
             message: entry.message ? stripHtmlTags(entry.message) : null,

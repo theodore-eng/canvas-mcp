@@ -208,6 +208,102 @@ function projectGrade(
   return computeWeightedGrade(projectedGroups, usesWeights);
 }
 
+/**
+ * Build projected groups with specific hypothetical scores applied to individual assignments.
+ * Used by both calculate_what_if_grade and calculate_target_grade.
+ */
+function buildProjectedGroups(
+  assignmentGroups: AssignmentGroup[],
+  hypotheticalMap: Map<number, number>,
+): { groups: GroupBreakdown[]; scenariosApplied: Array<{ assignment: string; hypothetical_score: number; points_possible: number }> } {
+  const scenariosApplied: Array<{
+    assignment: string;
+    hypothetical_score: number;
+    points_possible: number;
+  }> = [];
+
+  const groups: GroupBreakdown[] = assignmentGroups
+    .sort((a, b) => a.position - b.position)
+    .map(group => {
+      const assignments = (group.assignments ?? []).filter(
+        a => a.published && !a.omit_from_final_grade
+      );
+
+      const details: AssignmentDetail[] = [];
+
+      for (const a of assignments) {
+        const sub = getSubmission(a);
+        const hypothetical = hypotheticalMap.get(a.id);
+        let score: number | null;
+        let graded: boolean;
+
+        if (hypothetical !== undefined) {
+          score = hypothetical;
+          graded = true;
+          scenariosApplied.push({
+            assignment: a.name,
+            hypothetical_score: hypothetical,
+            points_possible: a.points_possible,
+          });
+        } else {
+          graded = isGraded(sub);
+          score = graded ? (sub!.score ?? null) : null;
+        }
+
+        const pct = graded && score !== null && a.points_possible > 0
+          ? Math.round((score / a.points_possible) * 1000) / 10
+          : null;
+
+        details.push({
+          id: a.id,
+          name: a.name,
+          score,
+          points_possible: a.points_possible,
+          percentage: pct,
+          graded,
+          due_at: a.due_at,
+          late: sub?.late ?? false,
+          missing: sub?.missing ?? false,
+        });
+      }
+
+      // Apply drop rules before computing group grade
+      const allGraded = details.filter(d => d.graded);
+      const dropLowest = group.rules?.drop_lowest ?? 0;
+      const dropHighest = group.rules?.drop_highest ?? 0;
+      const gradedAfterDrops = (dropLowest > 0 || dropHighest > 0)
+        ? applyDropRules(allGraded, dropLowest, dropHighest)
+        : allGraded;
+
+      const earned = gradedAfterDrops.reduce((sum, d) => sum + (d.score ?? 0), 0);
+      const possible = gradedAfterDrops.reduce((sum, d) => sum + d.points_possible, 0);
+
+      const groupPct = possible > 0
+        ? Math.round((earned / possible) * 1000) / 10
+        : null;
+
+      const weightedContribution = groupPct !== null
+        ? Math.round((groupPct * group.group_weight / 100) * 100) / 100
+        : null;
+
+      return {
+        name: group.name,
+        weight: group.group_weight,
+        earned_points: earned,
+        possible_points: possible,
+        group_percentage: groupPct,
+        weighted_contribution: weightedContribution,
+        drop_lowest: dropLowest || null,
+        drop_highest: dropHighest || null,
+        graded_count: allGraded.length,
+        total_count: assignments.length,
+        assignments: details,
+      };
+    });
+
+  return { groups, scenariosApplied };
+}
+
 // ==================== TOOL REGISTRATION ====================
 
 export function registerGradeAnalysisTools(server: McpServer) {
@@ -317,7 +413,7 @@ export function registerGradeAnalysisTools(server: McpServer) {
 
   server.tool(
     'calculate_what_if_grade',
-    "Calculate what grade you'd get under hypothetical scenarios — what you need on the final, what happens if you skip an assignment, etc.",
+    "Calculate what grade you'd get under hypothetical scenarios — what you need on the final, what happens if you skip an assignment, etc. Works on both graded and ungraded assignments.",
     {
       course_id: z.number().int().positive().describe('The Canvas course ID'),
       hypothetical_scores: z
@@ -341,6 +437,26 @@ export function registerGradeAnalysisTools(server: McpServer) {
 
         const usesWeights = course.apply_assignment_group_weights;
 
+        // Validate hypothetical scores and collect warnings
+        const warnings: string[] = [];
+        const allAssignments = assignmentGroups.flatMap(g => g.assignments ?? []);
+        const assignmentLookup = new Map(allAssignments.map(a => [a.id, a]));
+
+        for (const h of hypothetical_scores) {
+          const assignment = assignmentLookup.get(h.assignment_id);
+          if (!assignment) continue;
+
+          if (assignment.points_possible > 0 && h.score > assignment.points_possible * 1.5) {
+            warnings.push(
+              `Score ${h.score} for "${assignment.name}" exceeds 150% of points possible (${assignment.points_possible}). This seems unusually high.`
+            );
+          } else if (assignment.points_possible > 0 && h.score > assignment.points_possible) {
+            warnings.push(
+              `Score ${h.score} for "${assignment.name}" exceeds points possible (${assignment.points_possible}). Treating as extra credit.`
+            );
+          }
+        }
+
         // Build a lookup of hypothetical scores
         const hypotheticalMap = new Map(
           hypothetical_scores.map(h => [h.assignment_id, h.score])
@@ -353,92 +469,11 @@ export function registerGradeAnalysisTools(server: McpServer) {
 
         const currentGrade = computeWeightedGrade(currentGroups, usesWeights);
 
-        // Now build projected groups with hypotheticals applied
-        const scenariosApplied: Array<{
-          assignment: string;
-          hypothetical_score: number;
-          points_possible: number;
-        }> = [];
-
-        const projectedGroups: GroupBreakdown[] = assignmentGroups
-          .sort((a, b) => a.position - b.position)
-          .map(group => {
-            const assignments = (group.assignments ?? []).filter(
-              a => a.published && !a.omit_from_final_grade
-            );
-
-            const details: AssignmentDetail[] = [];
-
-            for (const a of assignments) {
-              const sub = getSubmission(a);
-              const hypothetical = hypotheticalMap.get(a.id);
-              let score: number | null;
-              let graded: boolean;
-
-              if (hypothetical !== undefined) {
-                // Apply hypothetical score
-                score = hypothetical;
-                graded = true;
-                scenariosApplied.push({
-                  assignment: a.name,
-                  hypothetical_score: hypothetical,
-                  points_possible: a.points_possible,
-                });
-              } else {
-                graded = isGraded(sub);
-                score = graded ? (sub!.score ?? null) : null;
-              }
-
-              const pct = graded && score !== null && a.points_possible > 0
-                ? Math.round((score / a.points_possible) * 1000) / 10
-                : null;
-
-              details.push({
-                id: a.id,
-                name: a.name,
-                score,
-                points_possible: a.points_possible,
-                percentage: pct,
-                graded,
-                due_at: a.due_at,
-                late: sub?.late ?? false,
-                missing: sub?.missing ?? false,
-              });
-            }
-
-            // Apply drop rules before computing group grade
-            const allGraded = details.filter(d => d.graded);
-            const dropLowest = group.rules?.drop_lowest ?? 0;
-            const dropHighest = group.rules?.drop_highest ?? 0;
-            const gradedAfterDrops = (dropLowest > 0 || dropHighest > 0)
-              ? applyDropRules(allGraded, dropLowest, dropHighest)
-              : allGraded;
-
-            const earned = gradedAfterDrops.reduce((sum, d) => sum + (d.score ?? 0), 0);
-            const possible = gradedAfterDrops.reduce((sum, d) => sum + d.points_possible, 0);
-
-            const groupPct = possible > 0
-              ? Math.round((earned / possible) * 1000) / 10
-              : null;
-
-            const weightedContribution = groupPct !== null
-              ? Math.round((groupPct * group.group_weight / 100) * 100) / 100
-              : null;
-
-            return {
-              name: group.name,
-              weight: group.group_weight,
-              earned_points: earned,
-              possible_points: possible,
-              group_percentage: groupPct,
-              weighted_contribution: weightedContribution,
-              drop_lowest: dropLowest || null,
-              drop_highest: dropHighest || null,
-              graded_count: allGraded.length,
-              total_count: assignments.length,
-              assignments: details,
-            };
-          });
+        // Build projected groups with hypotheticals applied
+        const { groups: projectedGroups, scenariosApplied } = buildProjectedGroups(
+          assignmentGroups,
+          hypotheticalMap,
+        );
 
         const projectedGrade = computeWeightedGrade(projectedGroups, usesWeights);
 
@@ -466,9 +501,115 @@ export function registerGradeAnalysisTools(server: McpServer) {
           change: changeStr,
           scenarios_applied: scenariosApplied,
           group_impacts: groupImpacts,
+          ...(warnings.length > 0 ? { warnings } : {}),
         });
       } catch (error) {
         return formatError('calculating what-if grade', error);
+      }
+    }
+  );
+
+  // ==================== CALCULATE TARGET GRADE ====================
+
+  server.tool(
+    'calculate_target_grade',
+    'Calculate what score you need on a specific assignment to achieve a target overall grade. Useful for answering "what do I need on the final to get an A?"',
+    {
+      course_id: z.number().int().positive().describe('The Canvas course ID'),
+      target_grade: z.number().min(0).max(100).describe('The target overall grade percentage'),
+      assignment_id: z.number().int().positive().describe('The assignment to solve for'),
+    },
+    async ({ course_id, target_grade, assignment_id }) => {
+      try {
+        const [course, assignmentGroups] = await Promise.all([
+          client.getCourse(course_id, ['total_scores']),
+          client.listAssignmentGroups(course_id, {
+            include: ['assignments', 'submission'],
+          }),
+        ]);
+
+        const usesWeights = course.apply_assignment_group_weights;
+
+        // Find the target assignment and its points_possible
+        const allAssignments = assignmentGroups.flatMap(g => g.assignments ?? []);
+        const targetAssignment = allAssignments.find(a => a.id === assignment_id);
+
+        if (!targetAssignment) {
+          return formatError('calculating target grade', new Error(
+            `Assignment ${assignment_id} not found in course ${course_id}.`
+          ));
+        }
+
+        if (targetAssignment.points_possible <= 0) {
+          return formatError('calculating target grade', new Error(
+            `Assignment "${targetAssignment.name}" has 0 points possible — cannot solve for a target score.`
+          ));
+        }
+
+        // Get current grade without hypothetical on target assignment
+        const currentGroups = assignmentGroups
+          .sort((a, b) => a.position - b.position)
+          .map(buildGroupBreakdown);
+        const currentGrade = computeWeightedGrade(currentGroups, usesWeights);
+
+        // Binary search: find the score on assignment_id that yields target_grade
+        // Search range: 0 to points_possible * 1.5 (allow some extra credit)
+        const maxScore = targetAssignment.points_possible * 1.5;
+        let lo = 0;
+        let hi = maxScore;
+        let neededScore: number | null = null;
+
+        // 50 iterations of binary search gives precision to ~10^-15
+        for (let iter = 0; iter < 50; iter++) {
+          const mid = (lo + hi) / 2;
+          const hypotheticalMap = new Map<number, number>([[assignment_id, mid]]);
+          const { groups } = buildProjectedGroups(assignmentGroups, hypotheticalMap);
+          const grade = computeWeightedGrade(groups, usesWeights);
+
+          if (grade === null) break;
+
+          if (grade < target_grade) {
+            lo = mid;
+          } else {
+            hi = mid;
+            neededScore = mid;
+          }
+        }
+
+        // Round to 2 decimal places
+        if (neededScore !== null) {
+          neededScore = Math.round(neededScore * 100) / 100;
+        }
+
+        const pointsPossible = targetAssignment.points_possible;
+        const neededPercentage = neededScore !== null
+          ? Math.round((neededScore / pointsPossible) * 1000) / 10
+          : null;
+
+        // Determine if the target is achievable (needed score <= 150% of points_possible)
+        const achievable = neededScore !== null && neededScore <= maxScore;
+
+        // If binary search couldn't find a solution (lo converged to hi at maxScore), it's not achievable
+        const isUnachievable = neededScore === null || neededScore > maxScore - 0.01;
+
+        return formatSuccess({
+          course_name: course.name,
+          assignment_name: targetAssignment.name,
+          target_grade,
+          current_grade: currentGrade,
+          needed_score: isUnachievable ? null : neededScore,
+          points_possible: pointsPossible,
+          needed_percentage: isUnachievable ? null : neededPercentage,
+          achievable: !isUnachievable,
+          ...(isUnachievable
+            ? { note: `A score of ${target_grade}% is not achievable with this single assignment alone. Even a perfect score (with extra credit) would not be enough.` }
+            : {}),
+          ...(!isUnachievable && neededPercentage !== null && neededPercentage > 100
+            ? { note: `You need more than 100% — extra credit of ${neededPercentage}% would be required on this assignment.` }
+            : {}),
+        });
+      } catch (error) {
+        return formatError('calculating target grade', error);
       }
     }
   );

@@ -8,12 +8,16 @@ export function registerActivityTools(server: McpServer) {
 
   server.tool(
     'get_activity_stream',
-    'Get recent activity across all your courses — announcements, discussions, submissions, messages, and more. Shows what has been happening lately.',
+    'Get recent activity across all your courses — announcements, discussions, submissions, messages, and more. Shows what has been happening lately. Supports filtering by activity type and course.',
     {
       limit: z.number().optional().default(20)
         .describe('Maximum number of items to return (default: 20, max: 50)'),
+      type: z.enum(['Announcement', 'Discussion', 'Submission', 'Message', 'Conference', 'Collaboration']).optional()
+        .describe('Filter to a specific activity type'),
+      course_id: z.number().int().positive().optional()
+        .describe('Filter to a specific course'),
     },
-    async ({ limit }) => {
+    async ({ limit, type, course_id }) => {
       try {
         const cappedLimit = Math.min(limit, 50);
 
@@ -23,12 +27,22 @@ export function registerActivityTools(server: McpServer) {
           per_page: cappedLimit,
         });
 
+        // Apply type filter if provided
+        let filtered = type
+          ? items.filter(i => i.type === type)
+          : items;
+
+        // Apply course_id filter if provided
+        if (course_id) {
+          filtered = filtered.filter(i => i.course_id === course_id);
+        }
+
         // Sort by created_at descending (most recent first)
-        items.sort((a, b) => {
+        filtered.sort((a, b) => {
           return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
         });
 
-        const sliced = items.slice(0, cappedLimit);
+        const sliced = filtered.slice(0, cappedLimit);
 
         const formattedItems = sliced.map(item => {
           const messagePreview = item.message
@@ -55,6 +69,8 @@ export function registerActivityTools(server: McpServer) {
 
         return formatSuccess({
           count: formattedItems.length,
+          ...(type ? { filtered_by_type: type } : {}),
+          ...(course_id ? { filtered_by_course: course_id } : {}),
           items: formattedItems,
         });
       } catch (error) {

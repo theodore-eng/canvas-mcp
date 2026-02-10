@@ -227,6 +227,111 @@ export function sortByDueDate<T extends { due_at: string | null }>(items: T[]): 
   });
 }
 
+/**
+ * Extract Canvas file links from HTML content.
+ * Finds <a> tags whose href points to Canvas file URLs and returns structured file info.
+ * This must be called BEFORE stripHtmlTags, which destroys link information.
+ */
+export function extractLinkedFiles(html: string): Array<{
+  filename: string;
+  file_id: number | null;
+  url: string;
+  link_text: string;
+}> {
+  const linkRegex = /<a[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  const filePatterns = [
+    /\/files\/(\d+)\/download/,
+    /\/courses\/\d+\/files\/(\d+)/,
+    /\/files\/(\d+)/,
+  ];
+
+  const seen = new Set<number>();
+  const results: Array<{
+    filename: string;
+    file_id: number | null;
+    url: string;
+    link_text: string;
+  }> = [];
+
+  let match: RegExpExecArray | null;
+  while ((match = linkRegex.exec(html)) !== null) {
+    const href = match[1];
+    const rawLinkText = match[2];
+
+    // Check if this href matches any Canvas file URL pattern
+    let fileId: number | null = null;
+    for (const pattern of filePatterns) {
+      const fileMatch = href.match(pattern);
+      if (fileMatch) {
+        fileId = parseInt(fileMatch[1], 10);
+        break;
+      }
+    }
+
+    // Skip non-file links
+    if (fileId === null) continue;
+
+    // Deduplicate by file_id
+    if (seen.has(fileId)) continue;
+    seen.add(fileId);
+
+    // Strip inner HTML tags from link text
+    const linkText = rawLinkText.replace(/<[^>]+>/g, '').trim();
+
+    // Determine filename: use link text unless it's generic/empty, then extract from URL
+    let filename = linkText;
+    if (!filename || /^(here|click|link|download|view)$/i.test(filename)) {
+      // Try to extract filename from URL path
+      const urlPath = href.split('?')[0];
+      const segments = urlPath.split('/');
+      const lastSegment = segments[segments.length - 1];
+      filename = lastSegment === 'download' && segments.length > 1
+        ? segments[segments.length - 2]
+        : lastSegment;
+      // If filename is still just a number (file ID), keep link text as-is
+      if (/^\d+$/.test(filename)) {
+        filename = linkText || `file_${fileId}`;
+      }
+    }
+
+    results.push({
+      filename,
+      file_id: fileId,
+      url: href,
+      link_text: linkText,
+    });
+  }
+
+  return results;
+}
+
+/**
+ * Extract all links from HTML content.
+ * Returns an array of {url, text} for every <a href> found in the HTML.
+ * This must be called BEFORE stripHtmlTags, which destroys link information.
+ */
+export function extractLinks(html: string): Array<{
+  url: string;
+  text: string;
+}> {
+  const linkRegex = /<a[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  const results: Array<{ url: string; text: string }> = [];
+
+  let match: RegExpExecArray | null;
+  while ((match = linkRegex.exec(html)) !== null) {
+    const href = match[1];
+    const rawText = match[2];
+    const text = rawText.replace(/<[^>]+>/g, '').trim();
+
+    results.push({
+      url: href,
+      text: text || href,
+    });
+  }
+
+  return results;
+}
+
 /** Maximum file size for text extraction (25 MB) */
 export const MAX_FILE_SIZE = 25 * 1024 * 1024;
 
