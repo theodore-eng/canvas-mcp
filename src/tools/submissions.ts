@@ -11,8 +11,8 @@ export function registerSubmissionTools(server: McpServer) {
     'get_submission',
     'Get your submission details for an assignment, including grade, score, feedback comments, and rubric assessment',
     {
-      course_id: z.number().describe('The Canvas course ID'),
-      assignment_id: z.number().describe('The assignment ID'),
+      course_id: z.number().int().positive().describe('The Canvas course ID'),
+      assignment_id: z.number().int().positive().describe('The assignment ID'),
       include_comments: z.boolean().optional().default(true)
         .describe('Include submission comments/feedback'),
     },
@@ -80,8 +80,8 @@ export function registerSubmissionTools(server: McpServer) {
       'submit_assignment',
       'Submit an assignment with text content or a URL. WARNING: This actually submits to Canvas and is visible to your instructor. Only use when explicitly asked.',
       {
-        course_id: z.number().describe('The Canvas course ID'),
-        assignment_id: z.number().describe('The assignment ID'),
+        course_id: z.number().int().positive().describe('The Canvas course ID'),
+        assignment_id: z.number().int().positive().describe('The assignment ID'),
         submission_type: z.enum(['online_text_entry', 'online_url']).describe('Type of submission'),
         body: z.string().optional().describe('Text content for online_text_entry submissions (supports HTML)'),
         url: z.string().optional().describe('URL for online_url submissions'),
@@ -124,8 +124,8 @@ export function registerSubmissionTools(server: McpServer) {
       'upload_file',
       'Upload a file and optionally submit it for an assignment. WARNING: If submit_after_upload is true, this submits to Canvas.',
       {
-        course_id: z.number().describe('The Canvas course ID'),
-        assignment_id: z.number().describe('The assignment ID'),
+        course_id: z.number().int().positive().describe('The Canvas course ID'),
+        assignment_id: z.number().int().positive().describe('The assignment ID'),
         file_name: z.string().min(1).describe('Name of the file to upload'),
         file_content: z.string().describe('Base64 encoded file content'),
         content_type: z.string().describe('MIME type of the file (e.g., application/pdf, text/plain)'),
@@ -137,11 +137,7 @@ export function registerSubmissionTools(server: McpServer) {
           // Decode base64 with error handling
           let fileBuffer: Uint8Array;
           try {
-            const binaryString = atob(file_content);
-            fileBuffer = new Uint8Array(binaryString.length);
-            for (let i = 0; i < binaryString.length; i++) {
-              fileBuffer[i] = binaryString.charCodeAt(i);
-            }
+            fileBuffer = new Uint8Array(Buffer.from(file_content, 'base64'));
           } catch {
             return formatError('uploading file',
               new Error('Invalid base64 file content'));

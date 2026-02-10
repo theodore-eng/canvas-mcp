@@ -1,6 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getCanvasClient } from '../canvas-client.js';
-import { formatError, formatSuccess } from '../utils.js';
+import { formatError, formatSuccess, runWithConcurrency } from '../utils.js';
 
 export function registerGradeTools(server: McpServer) {
   const client = getCanvasClient();
@@ -30,6 +30,7 @@ export function registerGradeTools(server: McpServer) {
               current_grade: enrollment?.computed_current_grade ?? null,
               final_score: enrollment?.computed_final_score ?? null,
               final_grade: enrollment?.computed_final_grade ?? null,
+              apply_assignment_group_weights: course.apply_assignment_group_weights,
             };
           });
 
@@ -54,8 +55,8 @@ export function registerGradeTools(server: McpServer) {
           state: ['available'],
         });
 
-        const results = await Promise.allSettled(
-          courses.map(async (course) => {
+        const results = await runWithConcurrency(
+          courses.map((course) => async () => {
             const assignments = await client.listAssignments(course.id, {
               include: ['submission'],
             });
@@ -102,6 +103,7 @@ export function registerGradeTools(server: McpServer) {
               course_id: course.id,
               course_name: course.name,
               missing: missing.sort((a, b) => (b.days_overdue ?? 0) - (a.days_overdue ?? 0)),
+              submitted: submitted,
               submitted_count: submitted.length,
               missing_count: missing.length,
             };
@@ -113,6 +115,7 @@ export function registerGradeTools(server: McpServer) {
             course_id: number;
             course_name: string;
             missing: Array<{ name: string; due_at: string | null; points_possible: number; days_overdue: number | null; html_url: string }>;
+            submitted: Array<{ name: string; grade: string | null; score: number | null; points_possible: number }>;
             submitted_count: number;
             missing_count: number;
           }> => r.status === 'fulfilled')

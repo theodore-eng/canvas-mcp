@@ -10,7 +10,7 @@ export function registerCalendarTools(server: McpServer) {
     'list_calendar_events',
     'List calendar events (exams, office hours, class sessions, etc.) across your courses',
     {
-      course_ids: z.array(z.number()).optional()
+      course_ids: z.array(z.number().int().positive()).optional()
         .describe('Filter to specific course IDs. If omitted, returns events from all courses.'),
       start_date: z.string().optional()
         .describe('Start date (YYYY-MM-DD). Defaults to today.'),
@@ -34,10 +34,26 @@ export function registerCalendarTools(server: McpServer) {
           contextCodes = courses.map(c => `course_${c.id}`);
         }
 
+        // Validate dates if provided
+        if (start_date) {
+          const d = new Date(start_date);
+          if (isNaN(d.getTime())) {
+            return formatError('listing calendar events',
+              new Error('Invalid start_date format. Please use YYYY-MM-DD format.'));
+          }
+        }
+        if (end_date) {
+          const d = new Date(end_date);
+          if (isNaN(d.getTime())) {
+            return formatError('listing calendar events',
+              new Error('Invalid end_date format. Please use YYYY-MM-DD format.'));
+          }
+        }
+
         const events = await client.listCalendarEvents({
           context_codes: contextCodes,
-          start_date: start_date ?? new Date().toISOString().split('T')[0],
-          end_date: end_date ?? new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          start_date: start_date ?? client.getLocalDateString(),
+          end_date: end_date ?? client.getLocalDateString(new Date(Date.now() + 14 * 24 * 60 * 60 * 1000)),
           type,
         });
 

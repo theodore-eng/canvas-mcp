@@ -1,0 +1,92 @@
+import { z } from 'zod';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { getCanvasClient } from '../canvas-client.js';
+import { formatError, formatSuccess, stripHtmlTags } from '../utils.js';
+
+export function registerActivityTools(server: McpServer) {
+  const client = getCanvasClient();
+
+  server.tool(
+    'get_activity_stream',
+    'Get recent activity across all your courses — announcements, discussions, submissions, messages, and more. Shows what has been happening lately.',
+    {
+      limit: z.number().optional().default(20)
+        .describe('Maximum number of items to return (default: 20, max: 50)'),
+    },
+    async ({ limit }) => {
+      try {
+        const cappedLimit = Math.min(limit, 50);
+
+        // Pass per_page to limit server-side instead of fetching everything
+        const items = await client.getActivityStream({
+          only_active_courses: true,
+          per_page: cappedLimit,
+        });
+
+        // Sort by created_at descending (most recent first)
+        items.sort((a, b) => {
+          return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+        });
+
+        const sliced = items.slice(0, cappedLimit);
+
+        const formattedItems = sliced.map(item => {
+          const messagePreview = item.message
+            ? stripHtmlTags(item.message).slice(0, 200)
+            : null;
+
+          const base: Record<string, unknown> = {
+            type: item.type,
+            title: item.title,
+            message_preview: messagePreview,
+            course_id: item.course_id ?? null,
+            created_at: item.created_at,
+            read: item.read_state,
+            html_url: item.html_url,
+          };
+
+          if (item.type === 'Submission') {
+            base.grade = item.grade ?? null;
+            base.score = item.score ?? null;
+          }
+
+          return base;
+        });
+
+        return formatSuccess({
+          count: formattedItems.length,
+          items: formattedItems,
+        });
+      } catch (error) {
+        return formatError('getting activity stream', error);
+      }
+    }
+  );
+
+  server.tool(
+    'get_activity_summary',
+    'Quick summary of unread activity counts by type — see at a glance how many announcements, discussions, submissions, and messages need attention.',
+    {},
+    async () => {
+      try {
+        const summary = await client.getActivityStreamSummary();
+
+        const formattedSummary = summary.map(item => ({
+          type: item.type,
+          unread_count: item.unread_count,
+          count: item.count,
+        }));
+
+        const totalUnread = summary.reduce((sum, item) => sum + item.unread_count, 0);
+
+        return formatSuccess({
+          total_unread: totalUnread,
+          count: formattedSummary.length,
+          summary: formattedSummary,
+        });
+      } catch (error) {
+        return formatError('getting activity summary', error);
+      }
+    }
+  );
+}

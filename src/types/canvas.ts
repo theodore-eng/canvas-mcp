@@ -81,6 +81,7 @@ export interface Assignment {
   post_manually: boolean;
   anonymous_grading: boolean;
   omit_from_final_grade: boolean;
+  score_statistics?: ScoreStatistics;
 }
 
 export type SubmissionType =
@@ -594,4 +595,172 @@ export interface UserProfile {
   time_zone: string;
   locale: string | null;
   calendar?: CalendarLink;
+}
+
+// ==================== ASSIGNMENT GROUPS ====================
+
+export interface AssignmentGroup {
+  id: number;
+  name: string;
+  position: number;
+  group_weight: number;
+  assignments?: Assignment[];
+  rules?: {
+    drop_lowest?: number;
+    drop_highest?: number;
+    never_drop?: number[];
+  };
+}
+
+export interface ListAssignmentGroupsParams {
+  include?: ('assignments' | 'discussion_topic' | 'assignment_visibility' | 'submission' | 'score_statistics')[];
+  assignment_ids?: number[];
+  exclude_assignment_submission_types?: string[];
+  override_assignment_dates?: boolean;
+  grading_period_id?: number;
+}
+
+// ==================== SCORE STATISTICS ====================
+
+export interface ScoreStatistics {
+  mean: number;
+  min: number;
+  max: number;
+  upper_q?: number;
+  median?: number;
+  lower_q?: number;
+}
+
+// ==================== CONVERSATIONS (INBOX) ====================
+
+export interface Conversation {
+  id: number;
+  subject: string;
+  workflow_state: 'read' | 'unread' | 'archived';
+  last_message: string | null;
+  last_message_at: string | null;
+  last_authored_message: string | null;
+  last_authored_message_at: string | null;
+  message_count: number;
+  subscribed: boolean;
+  private: boolean;
+  starred: boolean;
+  properties?: string[];
+  audience: number[];
+  audience_contexts: Record<string, Record<string, string[]>>;
+  avatar_url: string | null;
+  participants: ConversationParticipant[];
+  visible: boolean;
+  context_name?: string;
+  messages?: ConversationMessage[];
+}
+
+export interface ConversationParticipant {
+  id: number;
+  name: string;
+  full_name?: string;
+  avatar_url?: string;
+}
+
+export interface ConversationMessage {
+  id: number;
+  created_at: string;
+  body: string;
+  author_id: number;
+  generated: boolean;
+  media_comment: MediaComment | null;
+  forwarded_messages?: ConversationMessage[];
+  attachments?: FileAttachment[];
+  participating_user_ids?: number[];
+}
+
+export interface ListConversationsParams {
+  scope?: 'inbox' | 'unread' | 'starred' | 'sent' | 'archived';
+  filter?: string[];
+  filter_mode?: 'and' | 'or';
+  include_all_conversation_ids?: boolean;
+}
+
+// ==================== FOLDERS ====================
+
+export interface Folder {
+  id: number;
+  name: string;
+  full_name: string;
+  context_id: number;
+  context_type: string;
+  parent_folder_id: number | null;
+  created_at: string;
+  updated_at: string;
+  lock_at: string | null;
+  unlock_at: string | null;
+  position: number | null;
+  locked: boolean;
+  folders_url: string;
+  files_url: string;
+  files_count: number;
+  folders_count: number;
+  hidden: boolean | null;
+  locked_for_user: boolean;
+  hidden_for_user: boolean;
+  for_submissions: boolean;
+}
+
+export interface ListFoldersParams {
+  sort_by?: 'name' | 'created_at' | 'updated_at';
+  order?: 'asc' | 'desc';
+}
+
+// ==================== ACTIVITY STREAM ====================
+
+export interface ActivityStreamItem {
+  id: number;
+  title: string;
+  message: string | null;
+  type: 'DiscussionTopic' | 'Announcement' | 'Conversation' | 'Message' | 'Submission' | 'Conference' | 'Collaboration' | 'AssessmentRequest';
+  created_at: string;
+  updated_at: string;
+  read_state: boolean;
+  context_type: string;
+  course_id?: number;
+  group_id?: number;
+  html_url: string;
+
+  // Type-specific fields
+  total_root_discussion_entries?: number;
+  require_initial_post?: boolean;
+  user_has_posted?: boolean;
+  root_discussion_entries?: unknown[];
+  assignment_id?: number;
+  grade?: string;
+  score?: number;
+  submission_comments?: string[];
+}
+
+export interface ActivityStreamSummary {
+  type: string;
+  unread_count: number;
+  count: number;
+}
+
+// ==================== USER PREFERENCES (LEARNING SYSTEM) ====================
+
+export interface UserPreferences {
+  display: Record<string, unknown>;
+  priorities: Record<string, unknown>;
+  behavior: Record<string, unknown>;
+  courses: Record<string, Record<string, unknown>>;
+  last_updated?: string;
+}
+
+export interface ContextNote {
+  timestamp: string;
+  note: string;
+  source: 'observation' | 'user_statement' | 'implicit';
+}
+
+export interface ContextData {
+  workflow_patterns: ContextNote[];
+  conversation_notes: ContextNote[];
+  preferences_applied: ContextNote[];
 }

@@ -17,7 +17,7 @@ export function registerModuleTools(server: McpServer) {
     'list_modules',
     'List all modules in a course with their items (lectures, readings, assignments, etc.)',
     {
-      course_id: z.number().describe('The Canvas course ID'),
+      course_id: z.number().int().positive().describe('The Canvas course ID'),
       include_items: z.boolean().optional().default(true)
         .describe('Include module items in the response'),
       search_term: z.string().optional()
@@ -58,7 +58,7 @@ export function registerModuleTools(server: McpServer) {
           })) : undefined,
         }));
 
-        return formatSuccess(formattedModules);
+        return formatSuccess({ count: formattedModules.length, modules: formattedModules });
       } catch (error) {
         return formatError('listing modules', error);
       }
@@ -69,7 +69,8 @@ export function registerModuleTools(server: McpServer) {
     'list_announcements',
     'List announcements from one or more courses',
     {
-      course_ids: z.array(z.number()).describe('Array of course IDs to fetch announcements from'),
+      course_ids: z.array(z.number().int().positive()).optional()
+        .describe('Filter to specific course IDs. If omitted, returns announcements from all active courses.'),
       start_date: z.string().optional()
         .describe('Only return announcements posted after this date (ISO 8601 format)'),
       end_date: z.string().optional()
@@ -79,7 +80,16 @@ export function registerModuleTools(server: McpServer) {
     },
     async ({ course_ids, start_date, end_date, active_only }) => {
       try {
-        const contextCodes = course_ids.map(id => `course_${id}`);
+        let contextCodes: string[];
+        if (course_ids && course_ids.length > 0) {
+          contextCodes = course_ids.map(id => `course_${id}`);
+        } else {
+          const courses = await client.listCourses({
+            enrollment_state: 'active',
+            state: ['available'],
+          });
+          contextCodes = courses.map(c => `course_${c.id}`);
+        }
 
         const announcements = await client.listAnnouncements({
           context_codes: contextCodes,
@@ -103,7 +113,7 @@ export function registerModuleTools(server: McpServer) {
           })),
         }));
 
-        return formatSuccess(formattedAnnouncements);
+        return formatSuccess({ count: formattedAnnouncements.length, announcements: formattedAnnouncements });
       } catch (error) {
         return formatError('listing announcements', error);
       }
@@ -114,9 +124,9 @@ export function registerModuleTools(server: McpServer) {
     'get_module_item_content',
     'Read the actual content of a module item — fetches page text, file content (including PDFs), assignment descriptions, or discussion posts. Use this to read lecture notes, handouts, and readings without leaving Claude.',
     {
-      course_id: z.number().describe('The Canvas course ID'),
-      module_id: z.number().describe('The module ID'),
-      item_id: z.number().describe('The module item ID'),
+      course_id: z.number().int().positive().describe('The Canvas course ID'),
+      module_id: z.number().int().positive().describe('The module ID'),
+      item_id: z.number().int().positive().describe('The module item ID'),
     },
     async ({ course_id, module_id, item_id }) => {
       try {

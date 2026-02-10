@@ -10,7 +10,7 @@ export function registerAssignmentTools(server: McpServer) {
     'list_assignments',
     'List assignments in a course with submission status and grades. Can filter by status bucket (upcoming, overdue, etc.)',
     {
-      course_id: z.number().describe('The Canvas course ID'),
+      course_id: z.number().int().positive().describe('The Canvas course ID'),
       bucket: z.enum(['past', 'overdue', 'undated', 'ungraded', 'unsubmitted', 'upcoming', 'future']).optional()
         .describe('Filter assignments by status/time bucket'),
       order_by: z.enum(['position', 'name', 'due_at']).optional()
@@ -46,7 +46,7 @@ export function registerAssignmentTools(server: McpServer) {
           html_url: a.html_url,
         }));
 
-        return formatSuccess(formattedAssignments);
+        return formatSuccess({ count: formattedAssignments.length, assignments: formattedAssignments });
       } catch (error) {
         return formatError('listing assignments', error);
       }
@@ -57,8 +57,8 @@ export function registerAssignmentTools(server: McpServer) {
     'get_assignment',
     'Get full details about a specific assignment including description, rubric, and your submission status',
     {
-      course_id: z.number().describe('The Canvas course ID'),
-      assignment_id: z.number().describe('The assignment ID'),
+      course_id: z.number().int().positive().describe('The Canvas course ID'),
+      assignment_id: z.number().int().positive().describe('The assignment ID'),
       include_rubric: z.boolean().optional().default(true)
         .describe('Include rubric criteria if available'),
     },
@@ -127,8 +127,8 @@ export function registerAssignmentTools(server: McpServer) {
     'get_rubric',
     'Get the grading rubric for an assignment — shows criteria, point values, and rating descriptions',
     {
-      course_id: z.number().describe('The Canvas course ID'),
-      assignment_id: z.number().describe('The assignment ID to get rubric for'),
+      course_id: z.number().int().positive().describe('The Canvas course ID'),
+      assignment_id: z.number().int().positive().describe('The assignment ID to get rubric for'),
     },
     async ({ course_id, assignment_id }) => {
       try {

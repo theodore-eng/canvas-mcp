@@ -11,7 +11,7 @@ export function registerDiscussionTools(server: McpServer) {
     'list_discussions',
     'List discussion topics in a course, sorted by position, recent activity, or title',
     {
-      course_id: z.number().describe('The Canvas course ID'),
+      course_id: z.number().int().positive().describe('The Canvas course ID'),
       order_by: z.enum(['position', 'recent_activity', 'title']).optional()
         .describe('Order discussions by field'),
     },
@@ -37,7 +37,7 @@ export function registerDiscussionTools(server: McpServer) {
           html_url: topic.html_url,
         }));
 
-        return formatSuccess(formattedTopics);
+        return formatSuccess({ count: formattedTopics.length, discussions: formattedTopics });
       } catch (error) {
         return formatError('listing discussions', error);
       }
@@ -48,8 +48,8 @@ export function registerDiscussionTools(server: McpServer) {
     'get_discussion_entries',
     'Read the posts and replies in a discussion topic',
     {
-      course_id: z.number().describe('The Canvas course ID'),
-      topic_id: z.number().describe('The discussion topic ID'),
+      course_id: z.number().int().positive().describe('The Canvas course ID'),
+      topic_id: z.number().int().positive().describe('The discussion topic ID'),
     },
     async ({ course_id, topic_id }) => {
       try {
@@ -94,8 +94,8 @@ export function registerDiscussionTools(server: McpServer) {
       'post_discussion_entry',
       'Post a new entry to a discussion topic. This will be visible to your class. Only use when explicitly asked.',
       {
-        course_id: z.number().describe('The Canvas course ID'),
-        topic_id: z.number().describe('The discussion topic ID'),
+        course_id: z.number().int().positive().describe('The Canvas course ID'),
+        topic_id: z.number().int().positive().describe('The discussion topic ID'),
         message: z.string().min(1).describe('The message to post (supports HTML)'),
       },
       async ({ course_id, topic_id, message }) => {
@@ -122,9 +122,9 @@ export function registerDiscussionTools(server: McpServer) {
       'reply_to_discussion',
       'Reply to a specific post in a discussion topic. This will be visible to your class. Only use when explicitly asked.',
       {
-        course_id: z.number().describe('The Canvas course ID'),
-        topic_id: z.number().describe('The discussion topic ID'),
-        entry_id: z.number().describe('The entry ID to reply to'),
+        course_id: z.number().int().positive().describe('The Canvas course ID'),
+        topic_id: z.number().int().positive().describe('The discussion topic ID'),
+        entry_id: z.number().int().positive().describe('The entry ID to reply to'),
         message: z.string().min(1).describe('The reply message (supports HTML)'),
       },
       async ({ course_id, topic_id, entry_id, message }) => {

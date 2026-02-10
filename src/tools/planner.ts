@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getCanvasClient } from '../canvas-client.js';
-import { formatError, formatSuccess } from '../utils.js';
+import { formatError, formatSuccess, formatPlannerItem, sortByDueDate } from '../utils.js';
 
 export function registerPlannerTools(server: McpServer) {
   const client = getCanvasClient();
@@ -16,7 +16,7 @@ export function registerPlannerTools(server: McpServer) {
         .describe('Start date (YYYY-MM-DD). Defaults to today.'),
       end_date: z.string().optional()
         .describe('End date (YYYY-MM-DD). Defaults to 14 days from start.'),
-      course_ids: z.array(z.number()).optional()
+      course_ids: z.array(z.number().int().positive()).optional()
         .describe('Filter to specific course IDs'),
       filter: z.enum(['new_activity', 'incomplete_items', 'complete_items']).optional()
         .describe('Filter: new_activity, incomplete_items, or complete_items'),
@@ -26,39 +26,13 @@ export function registerPlannerTools(server: McpServer) {
         const contextCodes = course_ids?.map(id => `course_${id}`);
 
         const items = await client.listPlannerItems({
-          start_date: start_date ?? new Date().toISOString().split('T')[0],
-          end_date: end_date ?? new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          start_date: start_date ?? client.getLocalDateString(),
+          end_date: end_date ?? client.getLocalDateString(new Date(Date.now() + 14 * 24 * 60 * 60 * 1000)),
           context_codes: contextCodes,
           filter,
         });
 
-        const formattedItems = items.map(item => {
-          const plannable = item.plannable;
-          const dueDate = plannable.due_at || plannable.todo_date || null;
-
-          return {
-            type: item.plannable_type,
-            title: plannable.title || plannable.name || 'Untitled',
-            course: item.context_name ?? `course_${item.course_id}`,
-            course_id: item.course_id,
-            due_at: dueDate,
-            days_until_due: dueDate
-              ? Math.ceil((new Date(dueDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24))
-              : null,
-            points_possible: plannable.points_possible ?? null,
-            completed: item.planner_override?.marked_complete ?? false,
-            submissions: item.submissions || null,
-            html_url: item.html_url,
-            new_activity: item.new_activity ?? false,
-          };
-        });
-
-        // Sort by due date
-        formattedItems.sort((a, b) => {
-          if (!a.due_at) return 1;
-          if (!b.due_at) return -1;
-          return new Date(a.due_at).getTime() - new Date(b.due_at).getTime();
-        });
+        const formattedItems = sortByDueDate(items.map(item => formatPlannerItem(item)));
 
         return formatSuccess({
           count: formattedItems.length,
@@ -120,14 +94,20 @@ export function registerPlannerTools(server: McpServer) {
         .describe('Date to show on planner (YYYY-MM-DD)'),
       course_id: z.number().optional()
         .describe('Associate with a specific course (optional)'),
+      linked_object_type: z.enum(['announcement', 'assignment', 'discussion_topic', 'wiki_page', 'quiz']).optional()
+        .describe('Link this note to a specific Canvas object'),
+      linked_object_id: z.number().optional()
+        .describe('ID of the linked object'),
     },
-    async ({ title, details, todo_date, course_id }) => {
+    async ({ title, details, todo_date, course_id, linked_object_type, linked_object_id }) => {
       try {
         const note = await client.createPlannerNote({
           title,
           details,
           todo_date,
           course_id,
+          linked_object_type,
+          linked_object_id,
         });
 
         return formatSuccess({
@@ -147,6 +127,42 @@ export function registerPlannerTools(server: McpServer) {
   );
 
   server.tool(
+    'update_planner_note',
+    'Update an existing personal planner note — change title, details, date, or course.',
+    {
+      note_id: z.number().int().positive().describe('The planner note ID to update'),
+      title: z.string().optional().describe('New title'),
+      details: z.string().optional().describe('New details/description'),
+      todo_date: z.string().optional().describe('New date (YYYY-MM-DD)'),
+      course_id: z.number().optional().describe('New course association'),
+    },
+    async ({ note_id, title, details, todo_date, course_id }) => {
+      try {
+        const params: Record<string, unknown> = {};
+        if (title !== undefined) params.title = title;
+        if (details !== undefined) params.details = details;
+        if (todo_date !== undefined) params.todo_date = todo_date;
+        if (course_id !== undefined) params.course_id = course_id;
+
+        const note = await client.updatePlannerNote(note_id, params as any);
+
+        return formatSuccess({
+          success: true,
+          message: 'Planner note updated',
+          note: {
+            id: note.id,
+            title: note.title,
+            todo_date: note.todo_date,
+            course_id: note.course_id,
+          },
+        });
+      } catch (error) {
+        return formatError('updating planner note', error);
+      }
+    }
+  );
+
+  server.tool(
     'mark_planner_item_done',
     'Mark an item as complete on your planner. Only affects your personal view — does NOT submit anything.',
     {
@@ -154,14 +170,14 @@ export function registerPlannerTools(server: McpServer) {
         'announcement', 'assignment', 'discussion_topic', 'quiz',
         'wiki_page', 'planner_note', 'calendar_event',
       ]).describe('Type of the planner item'),
-      plannable_id: z.number()
+      plannable_id: z.number().int().positive()
         .describe('ID of the planner item'),
       complete: z.boolean().optional().default(true)
         .describe('true to mark complete, false to mark incomplete'),
     },
     async ({ plannable_type, plannable_id, complete }) => {
       try {
-        const override = await client.createPlannerOverride({
+        const override = await client.createOrUpdatePlannerOverride({
           plannable_type: plannable_type as 'assignment',
           plannable_id,
           marked_complete: complete,
@@ -189,7 +205,7 @@ export function registerPlannerTools(server: McpServer) {
     'delete_planner_note',
     'Delete a personal planner note. Only affects your own notes.',
     {
-      note_id: z.number().describe('The planner note ID to delete'),
+      note_id: z.number().int().positive().describe('The planner note ID to delete'),
     },
     async ({ note_id }) => {
       try {

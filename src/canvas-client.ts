@@ -28,6 +28,14 @@ import type {
   CreatePlannerNoteParams,
   CreatePlannerOverrideParams,
   SubmitAssignmentParams,
+  AssignmentGroup,
+  ListAssignmentGroupsParams,
+  Conversation,
+  ListConversationsParams,
+  Folder,
+  ListFoldersParams,
+  ActivityStreamItem,
+  ActivityStreamSummary,
 } from './types/canvas.js';
 
 interface CanvasClientConfig {
@@ -40,8 +48,18 @@ export class CanvasClient {
   private apiToken: string;
   private baseOrigin: string;
 
+  /** Cached user timezone from profile */
+  private userTimezone: string | null = null;
+
+  /** In-memory cache with TTL */
+  private cache = new Map<string, { data: unknown; expiresAt: number }>();
+
+  /** Default cache TTL: 5 minutes */
+  private static readonly CACHE_TTL_MS = 300_000;
   /** Default request timeout in milliseconds (30 seconds) */
   private static readonly REQUEST_TIMEOUT_MS = 30_000;
+  /** Maximum retry attempts for transient errors */
+  private static readonly MAX_RETRIES = 3;
   /** Maximum number of pages to fetch in paginated requests */
   private static readonly MAX_PAGES = 100;
   /** Maximum total items to collect across all pages */
@@ -92,6 +110,79 @@ export class CanvasClient {
     return `Canvas API error: ${status} ${statusText} - ${truncated}`;
   }
 
+  // ==================== CACHE ====================
+
+  private getCached<T>(key: string): T | null {
+    const entry = this.cache.get(key);
+    if (!entry) return null;
+    if (Date.now() > entry.expiresAt) {
+      this.cache.delete(key);
+      return null;
+    }
+    return entry.data as T;
+  }
+
+  private setCached(key: string, data: unknown, ttlMs: number = CanvasClient.CACHE_TTL_MS): void {
+    this.cache.set(key, { data, expiresAt: Date.now() + ttlMs });
+  }
+
+  /** Clear all cached data */
+  public clearCache(): void {
+    this.cache.clear();
+  }
+
+  // ==================== RETRY ====================
+
+  /**
+   * Fetch with retry logic for transient errors (429, 5xx).
+   * Uses exponential backoff and honors Retry-After header.
+   */
+  private async fetchWithRetry(
+    url: string,
+    options: RequestInit,
+    callerSignal?: AbortSignal | null,
+  ): Promise<Response> {
+    let lastError: Error | null = null;
+
+    for (let attempt = 0; attempt <= CanvasClient.MAX_RETRIES; attempt++) {
+      try {
+        const response = await fetch(url, {
+          ...options,
+          signal: callerSignal ?? this.createTimeoutSignal(),
+        });
+
+        // Don't retry on success or non-retryable errors
+        if (response.ok) return response;
+
+        const isRetryable = response.status === 429 || response.status >= 500;
+        if (!isRetryable || attempt === CanvasClient.MAX_RETRIES) {
+          const errorBody = await response.text();
+          throw new Error(this.sanitizeErrorMessage(response.status, response.statusText, errorBody));
+        }
+
+        // Calculate backoff delay
+        const retryAfter = response.headers.get('Retry-After');
+        let delayMs: number;
+        if (retryAfter) {
+          const parsed = parseInt(retryAfter, 10);
+          delayMs = isNaN(parsed) ? (1000 * Math.pow(2, attempt)) : parsed * 1000;
+        } else {
+          delayMs = 1000 * Math.pow(2, attempt); // 1s, 2s, 4s
+        }
+
+        console.error(`Canvas API ${response.status}: retrying in ${delayMs}ms (attempt ${attempt + 1}/${CanvasClient.MAX_RETRIES})`);
+        await response.text(); // consume body before retry
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+      } catch (error) {
+        if (error instanceof Error && error.name === 'AbortError') throw error;
+        lastError = error instanceof Error ? error : new Error(String(error));
+        if (attempt === CanvasClient.MAX_RETRIES) throw lastError;
+      }
+    }
+
+    throw lastError ?? new Error('Request failed after retries');
+  }
+
   private async request<T>(
     endpoint: string,
     options: RequestInit = {}
@@ -113,18 +204,16 @@ export class CanvasClient {
       ...options.headers,
     };
 
-    const response = await fetch(url, {
-      ...options,
-      headers,
-      signal: options.signal ?? this.createTimeoutSignal(),
-    });
+    const response = await this.fetchWithRetry(url, { ...options, headers }, options.signal);
 
-    if (!response.ok) {
-      const errorBody = await response.text();
-      throw new Error(this.sanitizeErrorMessage(response.status, response.statusText, errorBody));
+    // Clone response so we can read the body as text if JSON parsing fails
+    const cloned = response.clone();
+    try {
+      return await response.json() as T;
+    } catch {
+      const text = await cloned.text().catch(() => '(empty body)');
+      throw new Error(`Canvas API returned non-JSON response (${response.status}): ${text.substring(0, 200)}`);
     }
-
-    return response.json() as Promise<T>;
   }
 
   /**
@@ -165,18 +254,16 @@ export class CanvasClient {
         ...options.headers,
       };
 
-      const response = await fetch(url, {
-        ...options,
-        headers,
-        signal: options.signal ?? this.createTimeoutSignal(),
-      });
+      const response = await this.fetchWithRetry(url, { ...options, headers }, options.signal);
 
-      if (!response.ok) {
-        const errorBody = await response.text();
-        throw new Error(this.sanitizeErrorMessage(response.status, response.statusText, errorBody));
+      let data: T[];
+      const clonedPaged = response.clone();
+      try {
+        data = await response.json() as T[];
+      } catch {
+        const text = await clonedPaged.text().catch(() => '(empty body)');
+        throw new Error(`Canvas API returned non-JSON response (${response.status}): ${text.substring(0, 200)}`);
       }
-
-      const data = await response.json() as T[];
       results.push(...data);
 
       // Guard: max items
@@ -223,13 +310,54 @@ export class CanvasClient {
   // ==================== COURSES ====================
 
   async listCourses(params: ListCoursesParams = {}): Promise<Course[]> {
+    const cacheKey = `courses:${JSON.stringify(params)}`;
+    const cached = this.getCached<Course[]>(cacheKey);
+    if (cached) return cached;
+
     const query = this.buildQueryString(params);
-    return this.requestPaginated<Course>(`/courses${query}`);
+    const courses = await this.requestPaginated<Course>(`/courses${query}`);
+    this.setCached(cacheKey, courses);
+    return courses;
   }
 
   async getCourse(courseId: number, include?: string[]): Promise<Course> {
     const query = include ? this.buildQueryString({ include }) : '';
     return this.request<Course>(`/courses/${courseId}${query}`);
+  }
+
+  /**
+   * Get a course's syllabus as plain text. Cached for 10 minutes since syllabi rarely change.
+   * Returns null if the course has no syllabus.
+   */
+  async getCourseSyllabus(courseId: number): Promise<{ text: string; course_name: string } | null> {
+    const cacheKey = `syllabus:${courseId}`;
+    // Use a wrapper to distinguish "not cached" from "cached null"
+    const cached = this.getCached<{ value: { text: string; course_name: string } | null }>(cacheKey);
+    if (cached) return cached.value;
+
+    const course = await this.getCourse(courseId, ['syllabus_body']);
+    if (!course.syllabus_body) {
+      this.setCached(cacheKey, { value: null }, 600_000); // cache the miss too
+      return null;
+    }
+
+    // Import stripHtmlTags dynamically to avoid circular deps
+    const { stripHtmlTags } = await import('./utils.js');
+    const result = { text: stripHtmlTags(course.syllabus_body), course_name: course.name };
+    this.setCached(cacheKey, { value: result }, 600_000); // 10 min TTL
+    return result;
+  }
+
+  // ==================== ASSIGNMENT GROUPS ====================
+
+  async listAssignmentGroups(
+    courseId: number,
+    params: ListAssignmentGroupsParams = {}
+  ): Promise<AssignmentGroup[]> {
+    const query = this.buildQueryString(params);
+    return this.requestPaginated<AssignmentGroup>(
+      `/courses/${courseId}/assignment_groups${query}`
+    );
   }
 
   // ==================== ASSIGNMENTS ====================
@@ -574,6 +702,10 @@ export class CanvasClient {
     });
   }
 
+  async listPlannerOverrides(): Promise<PlannerOverride[]> {
+    return this.requestPaginated<PlannerOverride>('/planner/overrides');
+  }
+
   async createPlannerOverride(
     params: CreatePlannerOverrideParams
   ): Promise<PlannerOverride> {
@@ -593,10 +725,86 @@ export class CanvasClient {
     });
   }
 
+  /**
+   * Create or update a planner override. Tries to create first;
+   * if the override already exists (400), finds the existing one and updates it.
+   */
+  async createOrUpdatePlannerOverride(
+    params: CreatePlannerOverrideParams
+  ): Promise<PlannerOverride> {
+    try {
+      return await this.createPlannerOverride(params);
+    } catch (error) {
+      // Canvas returns 400 if override already exists — find and update it
+      if (error instanceof Error && error.message.includes('400')) {
+        const overrides = await this.listPlannerOverrides();
+        const existing = overrides.find(
+          o => o.plannable_type === params.plannable_type && o.plannable_id === params.plannable_id
+        );
+        if (existing) {
+          return this.updatePlannerOverride(existing.id, {
+            marked_complete: params.marked_complete,
+          });
+        }
+      }
+      throw error;
+    }
+  }
+
   // ==================== USER PROFILE ====================
 
   async getUserProfile(): Promise<UserProfile> {
-    return this.request<UserProfile>('/users/self/profile');
+    const cacheKey = 'user-profile';
+    const cached = this.getCached<UserProfile>(cacheKey);
+    if (cached) return cached;
+
+    const profile = await this.request<UserProfile>('/users/self/profile');
+    this.setCached(cacheKey, profile);
+    return profile;
+  }
+
+  // ==================== TIMEZONE ====================
+
+  /**
+   * Get the user's timezone from their Canvas profile.
+   * Caches the result for subsequent calls. Falls back to 'UTC'.
+   */
+  async getUserTimezone(): Promise<string> {
+    if (this.userTimezone) return this.userTimezone;
+    try {
+      const profile = await this.getUserProfile();
+      this.userTimezone = profile.time_zone || 'UTC';
+    } catch {
+      this.userTimezone = 'UTC';
+    }
+    return this.userTimezone;
+  }
+
+  /**
+   * Get a YYYY-MM-DD string in the user's timezone.
+   * Falls back to UTC if timezone not yet loaded.
+   */
+  getLocalDateString(date?: Date): string {
+    const d = date ?? new Date();
+    const tz = this.userTimezone ?? 'UTC';
+    try {
+      const formatter = new Intl.DateTimeFormat('en-CA', {
+        timeZone: tz,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      });
+      return formatter.format(d);
+    } catch {
+      return d.toISOString().split('T')[0];
+    }
+  }
+
+  /**
+   * Get the current date/time for consistent "now" handling.
+   */
+  getLocalNow(): Date {
+    return new Date();
   }
 
   // ==================== SEARCH / UTILITY ====================
@@ -604,17 +812,55 @@ export class CanvasClient {
   async searchCourseContent(
     courseId: number,
     searchTerm: string
-  ): Promise<{ modules: Module[]; assignments: Assignment[] }> {
-    const modules = await this.listModules(courseId, {
-      search_term: searchTerm,
-      include: ['items'],
-    });
+  ): Promise<{
+    modules: Module[];
+    assignments: Assignment[];
+    pages: Page[];
+    files: CanvasFile[];
+    discussions: DiscussionTopic[];
+  }> {
+    // Run all searches in parallel for speed
+    // For modules: fetch ALL modules with items, then filter client-side by both
+    // module name AND item title — the Canvas API search_term only matches module names,
+    // so searching for "midterm" would miss an item titled "Midterm Review" inside "Unit 5"
+    const [modules, assignments, pages, files, discussions] = await Promise.allSettled([
+      this.listModules(courseId, {
+        include: ['items'],
+      }),
+      this.listAssignments(courseId, {
+        search_term: searchTerm,
+      }),
+      this.listPages(courseId, {
+        search_term: searchTerm,
+      }),
+      this.listCourseFiles(courseId, {
+        search_term: searchTerm,
+      }),
+      this.listDiscussionTopics(courseId),
+    ]);
 
-    const assignments = await this.listAssignments(courseId, {
-      search_term: searchTerm,
-    });
+    // Filter modules: include a module if its name OR any of its item titles match
+    const allModules = modules.status === 'fulfilled' ? modules.value : [];
+    const lowerTerm = searchTerm.toLowerCase();
+    const filteredModules = allModules.filter(m =>
+      m.name.toLowerCase().includes(lowerTerm) ||
+      m.items?.some(item => item.title.toLowerCase().includes(lowerTerm))
+    );
 
-    return { modules, assignments };
+    // Filter discussions client-side since the API doesn't have a search_term param
+    const allDiscussions = discussions.status === 'fulfilled' ? discussions.value : [];
+    const filteredDiscussions = allDiscussions.filter(d =>
+      d.title.toLowerCase().includes(lowerTerm) ||
+      (d.message && d.message.toLowerCase().includes(lowerTerm))
+    );
+
+    return {
+      modules: filteredModules,
+      assignments: assignments.status === 'fulfilled' ? assignments.value : [],
+      pages: pages.status === 'fulfilled' ? pages.value : [],
+      files: files.status === 'fulfilled' ? files.value : [],
+      discussions: filteredDiscussions,
+    };
   }
 
   async getUpcomingAssignments(
@@ -657,6 +903,68 @@ export class CanvasClient {
       const dueDate = new Date(a.due_at);
       return dueDate >= startDate && dueDate <= endDate;
     });
+  }
+
+  // ==================== CONVERSATIONS (INBOX) ====================
+
+  async listConversations(
+    params: ListConversationsParams = {}
+  ): Promise<Conversation[]> {
+    const query = this.buildQueryString(params);
+    return this.requestPaginated<Conversation>(`/conversations${query}`);
+  }
+
+  async getConversation(
+    conversationId: number
+  ): Promise<Conversation> {
+    return this.request<Conversation>(`/conversations/${conversationId}`);
+  }
+
+  // ==================== FOLDERS ====================
+
+  async listCourseFolders(
+    courseId: number,
+    params: ListFoldersParams = {}
+  ): Promise<Folder[]> {
+    const query = this.buildQueryString(params);
+    return this.requestPaginated<Folder>(`/courses/${courseId}/folders${query}`);
+  }
+
+  async getFolder(folderId: number): Promise<Folder> {
+    return this.request<Folder>(`/folders/${folderId}`);
+  }
+
+  async listFolderFiles(
+    folderId: number,
+    params: ListFilesParams = {}
+  ): Promise<CanvasFile[]> {
+    const query = this.buildQueryString(params);
+    return this.requestPaginated<CanvasFile>(`/folders/${folderId}/files${query}`);
+  }
+
+  async listFolderSubfolders(
+    folderId: number,
+    params: ListFoldersParams = {}
+  ): Promise<Folder[]> {
+    const query = this.buildQueryString(params);
+    return this.requestPaginated<Folder>(`/folders/${folderId}/folders${query}`);
+  }
+
+  // ==================== ACTIVITY STREAM ====================
+
+  async getActivityStream(
+    params: { only_active_courses?: boolean; per_page?: number } = {}
+  ): Promise<ActivityStreamItem[]> {
+    const query = this.buildQueryString(params);
+    // When per_page is set, use single request to avoid paginating through entire history
+    if (params.per_page) {
+      return this.request<ActivityStreamItem[]>(`/users/self/activity_stream${query}`);
+    }
+    return this.requestPaginated<ActivityStreamItem>(`/users/self/activity_stream${query}`);
+  }
+
+  async getActivityStreamSummary(): Promise<ActivityStreamSummary[]> {
+    return this.request<ActivityStreamSummary[]>('/users/self/activity_stream/summary');
   }
 
   // ==================== USER INFO ====================

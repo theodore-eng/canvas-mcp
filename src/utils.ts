@@ -6,14 +6,42 @@
  */
 export async function parsePdf(buffer: Buffer): Promise<{ text: string; numpages: number }> {
   try {
-    const { PDFParse } = await import('pdf-parse');
-    const parser = new PDFParse({ data: new Uint8Array(buffer) });
-    const result = await parser.getText();
-    const numpages = result.total;
-    await parser.destroy();
-    return { text: result.text, numpages };
+    // Race against a 30-second timeout to prevent hangs on corrupted PDFs
+    const result = await Promise.race([
+      (async () => {
+        const { PDFParse } = await import('pdf-parse');
+        const parser = new PDFParse({ data: new Uint8Array(buffer) });
+        const parsed = await parser.getText();
+        const numpages = parsed.total;
+        await parser.destroy();
+        return { text: parsed.text, numpages };
+      })(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('PDF parsing timed out after 30 seconds')), 30_000)
+      ),
+    ]);
+    return result;
   } catch (error) {
     throw new Error(`PDF parsing failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/**
+ * Parse Office documents (DOCX, PPTX, XLSX, ODT, ODP, ODS) into text.
+ * Uses officeparser for broad format support.
+ */
+export async function parseOfficeDocument(buffer: Buffer): Promise<string> {
+  try {
+    const { parseOffice } = await import('officeparser');
+    const result = await Promise.race([
+      parseOffice(buffer) as Promise<unknown>,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('Office document parsing timed out after 30 seconds')), 30_000)
+      ),
+    ]);
+    return String(result);
+  } catch (error) {
+    throw new Error(`Office document parsing failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -42,9 +70,15 @@ export function stripHtmlTags(html: string): string {
     .replace(/&lsquo;/g, '\u2018')
     .replace(/&rdquo;/g, '\u201D')
     .replace(/&ldquo;/g, '\u201C')
-    // Decode numeric entities
-    .replace(/&#(\d+);/g, (_match, code) => String.fromCharCode(parseInt(code, 10)))
-    .replace(/&#x([0-9a-f]+);/gi, (_match, code) => String.fromCharCode(parseInt(code, 16)))
+    // Decode numeric entities (with range validation)
+    .replace(/&#(\d+);/g, (_match, code) => {
+      const num = parseInt(code, 10);
+      return num >= 0 && num <= 0x10FFFF ? String.fromCodePoint(num) : '';
+    })
+    .replace(/&#x([0-9a-f]+);/gi, (_match, code) => {
+      const num = parseInt(code, 16);
+      return num >= 0 && num <= 0x10FFFF ? String.fromCodePoint(num) : '';
+    })
     // Clean up whitespace
     .replace(/[ \t]+/g, ' ')
     .replace(/\n[ \t]+/g, '\n')
@@ -109,6 +143,18 @@ export async function extractTextFromFile(
     const pdfData = await parsePdf(buffer);
     extractedText = pdfData.text;
     pages = pdfData.numpages;
+  } else if (
+    contentType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+    contentType === 'application/msword' ||
+    contentType === 'application/vnd.openxmlformats-officedocument.presentationml.presentation' ||
+    contentType === 'application/vnd.ms-powerpoint' ||
+    contentType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+    contentType === 'application/vnd.ms-excel' ||
+    contentType === 'application/vnd.oasis.opendocument.text' ||
+    contentType === 'application/vnd.oasis.opendocument.presentation' ||
+    contentType === 'application/vnd.oasis.opendocument.spreadsheet'
+  ) {
+    extractedText = await parseOfficeDocument(buffer);
   } else if (contentType === 'text/html') {
     extractedText = stripHtmlTags(buffer.toString('utf-8'));
   } else if (
@@ -131,8 +177,85 @@ export async function extractTextFromFile(
   return { text: extractedText, truncated, pages };
 }
 
+/**
+ * Format a planner item into a standardized shape for LLM consumption.
+ * Used across planner, search, dashboard, and resources to prevent duplication.
+ */
+export function formatPlannerItem(item: {
+  plannable_type: string;
+  plannable: { title?: string; name?: string; due_at?: string; todo_date?: string; points_possible?: number };
+  context_name?: string;
+  course_id?: number;
+  planner_override?: { marked_complete?: boolean } | null;
+  submissions?: { graded?: boolean; needs_grading?: boolean; missing?: boolean } | false | null;
+  html_url?: string;
+  new_activity?: boolean;
+}, courseNameFallback?: string) {
+  const plannable = item.plannable;
+  const dueDate = plannable.due_at || plannable.todo_date || null;
+
+  return {
+    type: item.plannable_type,
+    title: plannable.title || plannable.name || 'Untitled',
+    course: item.context_name ?? courseNameFallback ?? (item.course_id ? `course_${item.course_id}` : 'Unknown'),
+    course_id: item.course_id ?? null,
+    due_at: dueDate,
+    days_until_due: dueDate
+      ? Math.ceil((new Date(dueDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24))
+      : null,
+    points_possible: plannable.points_possible ?? null,
+    completed: item.planner_override?.marked_complete ?? false,
+    submitted: item.submissions && typeof item.submissions === 'object'
+      ? (item.submissions.graded || item.submissions.needs_grading || false)
+      : false,
+    missing: item.submissions && typeof item.submissions === 'object'
+      ? (item.submissions.missing ?? false)
+      : false,
+    html_url: item.html_url,
+    new_activity: item.new_activity ?? false,
+  };
+}
+
+/**
+ * Sort items by due date ascending (soonest first, null dates last).
+ */
+export function sortByDueDate<T extends { due_at: string | null }>(items: T[]): T[] {
+  return items.sort((a, b) => {
+    if (!a.due_at) return 1;
+    if (!b.due_at) return -1;
+    return new Date(a.due_at).getTime() - new Date(b.due_at).getTime();
+  });
+}
+
 /** Maximum file size for text extraction (25 MB) */
 export const MAX_FILE_SIZE = 25 * 1024 * 1024;
 
 /** Default max characters for text extraction */
 export const DEFAULT_MAX_TEXT_LENGTH = 50000;
+
+/**
+ * Run async tasks with a concurrency limit to avoid overwhelming the Canvas API.
+ * Returns results in the same order as the input tasks.
+ */
+export async function runWithConcurrency<T>(
+  tasks: (() => Promise<T>)[],
+  limit: number = 3
+): Promise<PromiseSettledResult<T>[]> {
+  const results: PromiseSettledResult<T>[] = new Array(tasks.length);
+  let nextIndex = 0;
+
+  async function worker() {
+    while (nextIndex < tasks.length) {
+      const index = nextIndex++;
+      try {
+        results[index] = { status: 'fulfilled', value: await tasks[index]() };
+      } catch (reason) {
+        results[index] = { status: 'rejected', reason };
+      }
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(limit, tasks.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}

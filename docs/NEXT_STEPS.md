@@ -1,111 +1,115 @@
 # Next Steps — Canvas MCP Server
 
 **Last updated**: 2026-02-10
-**Current version**: v2.0
+**Current version**: v2.2
 
-## Immediate Priorities
+## Completed in v2.2
 
-### 1. Retry Logic with Exponential Backoff
-**Why**: Canvas API rate-limits at ~120 requests/minute. When daily_briefing or get_all_upcoming_work fires many parallel requests, some may get 429'd.
+### New Tools (8 new tools)
+- [x] `list_conversations` — Canvas inbox messages with scope filtering (unread, starred, sent, archived)
+- [x] `get_conversation` — Full conversation thread with resolved author names
+- [x] `list_course_folders` — Browse folder structure for any course
+- [x] `browse_folder` — View folder contents (subfolders + files) with metadata
+- [x] `get_activity_stream` — Recent activity across all courses (grades, announcements, discussions)
+- [x] `get_activity_summary` — Unread counts by activity type
+- [x] `save_preference` / `list_preferences` / `delete_preference` — Persistent user preference system
+- [x] `save_context_note` / `list_context_notes` / `clear_old_context` — Learning/context memory system
 
-**Plan**:
-- Add a `requestWithRetry()` wrapper in canvas-client.ts
-- Retry on 429 (Too Many Requests) and 5xx errors
-- Exponential backoff: 1s → 2s → 4s, max 3 retries
-- Honor `Retry-After` header from Canvas
+### Learning System (new)
+- [x] Persistent preference storage at `~/.canvas-mcp/preferences.json`
+- [x] Context/learning notes at `~/.canvas-mcp/context.json`
+- [x] Categories: display, priorities, behavior, per-course settings
+- [x] Context categories: workflow_patterns, conversation_notes, preferences_applied
+- [x] Auto-pruning of old context notes (configurable retention)
+- [x] Secure file permissions (0o700 directory, 0o600 files)
 
-### 2. User Timezone Support
-**Why**: Canvas stores dates in UTC. "Due today" calculations use server time, which may be wrong for the user.
+### New Prompts (10 total, up from 8)
+- [x] `inbox_review` — Check unread messages, prioritize by course importance
+- [x] `whats_new` — Quick scan of recent activity, grades, announcements
 
-**Plan**:
-- Read user timezone from `getUserProfile()` on startup
-- Cache it in the singleton client
-- Use it for all "today/tomorrow" calculations in dashboard, planner, search
-- Fall back to UTC if unavailable
+### Enhanced Prompts
+- [x] `quick_check` — now references activity stream, inbox, and user preferences
+- [x] `catch_up` — now references activity stream, inbox, and user preferences
 
-### 3. Course Context Cache
-**Why**: Many tools call `listCourses()` independently (dashboard, grades, search, calendar). This wastes API calls and slows everything down.
+### New Resources (9 total, up from 6)
+- [x] `canvas://user/preferences` — Auto-surfaces user preferences to Claude for personalization
+- [x] `canvas://user/context` — Auto-surfaces learned patterns and observations
+- [x] `canvas://inbox/unread` — Quick view of unread inbox messages
 
-**Plan**:
-- Add a simple in-memory cache in canvas-client.ts with TTL (5 minutes)
-- Cache course list, user profile, and other stable data
-- Invalidate on explicit refresh or TTL expiry
-- Reduces API calls significantly for tools that run in sequence
+### Infrastructure
+- [x] Canvas client methods for Conversations, Folders, Activity Stream APIs
+- [x] Full TypeScript types for all new API entities
+- [x] Startup logging updated with all new features
 
-## Feature Ideas
+## Completed in v2.1
 
-### 4. Conversation Memory / Learning
-**Why**: Claude forgets your courses and preferences between conversations.
+### Infrastructure
+- [x] Retry logic with exponential backoff (429/5xx, honors Retry-After header)
+- [x] User timezone support (cached from profile, used for date calculations)
+- [x] Course context cache with 5-minute TTL (listCourses, getUserProfile)
+- [x] PDF parsing timeout (30-second guard against corrupted PDFs)
+- [x] DOCX/PPTX/XLSX text extraction via officeparser
+- [x] HTML entity numeric range validation (fromCodePoint with 0x10FFFF guard)
 
-**Plan**:
-- Create a `~/.canvas-mcp/preferences.json` file
-- Store: frequently accessed courses, preferred timezone, common queries
-- Load on startup and expose as an MCP resource (`canvas://preferences`)
-- Update after each session with new patterns
-- Lets Claude say "I see you usually check CS 400 and MATH 234" without asking
+### Bug Fixes
+- [x] Buffer.from() for base64 decoding (replaces browser-only atob)
+- [x] Date validation in calendar tool
+- [x] Type casting fix in planner mark_planner_item_done
+- [x] Version constant (no more hardcoded strings)
+- [x] daily_briefing: submitted check includes needs_grading
+- [x] daily_briefing: resolves context_code to course names
+- [x] list_announcements: course_ids now optional (auto-fetches all courses)
+- [x] mark_planner_item_done: handles existing overrides via fallback to update
+- [x] get_all_upcoming_work: rewritten to use planner API (1 call instead of N+1)
 
-### 5. Grade Trend Tracking
-**Why**: Students want to know if their grade is improving or dropping.
+### New Tools
+- [x] `get_grade_breakdown` — assignment group weights, per-group analysis, grade projections
+- [x] `calculate_what_if_grade` — hypothetical score scenarios
+- [x] `get_recent_feedback` — recently graded assignments with scores and feedback
+- [x] `update_planner_note` — edit existing planner notes
+- [x] `search_all_courses` — cross-course content search
+- [x] `create_planner_note` now supports linked_object_type/id
 
-**Plan**:
-- Store grade snapshots in `~/.canvas-mcp/grade-history.json`
-- Record grades each time `get_my_grades` is called
-- Add a `get_grade_trends` tool that shows change over time
-- "Your CS 400 grade went from 87% to 91% over the last 2 weeks"
+### Improved Tools
+- [x] `get_my_grades` — now includes apply_assignment_group_weights
+- [x] `get_my_submission_status` — now returns full submitted array (not just count)
+- [x] `search_course_content` — now searches pages, files, and discussions (not just modules/assignments)
+- [x] `get_all_upcoming_work` — includes quizzes, discussions; shows by_course grouping
 
-### 6. Smart Notifications / Digest
-**Why**: Canvas has a lot of noise. Students want to know what actually matters.
+### New Prompts (8 total, up from 4)
+- [x] `grade_analysis` — course grade deep-dive
+- [x] `catch_up` — "what did I miss?" recovery mode
+- [x] `end_of_semester` — final grade projections
+- [x] `submission_review` — rubric-based pre-submission review
 
-**Plan**:
-- Add a `get_whats_new` tool that compares current state to last-known state
-- Track: new announcements, new grades posted, new assignments published
-- Store last-seen timestamps in `~/.canvas-mcp/state.json`
-- Returns only genuinely new items since last check
+### New Resources (6 total, up from 4)
+- [x] `canvas://deadlines/upcoming` — rolling 7-day deadline view
+- [x] `canvas://courses/{id}/modules` — course module structure
 
-### 7. Assignment Content Preparation
-**Why**: User wants Claude to help prepare assignment content without auto-submitting.
+## Remaining Feature Ideas
 
-**Plan**:
-- Add a `prepare_assignment_draft` tool
-- Takes assignment details + user instructions
-- Returns formatted content ready to submit
-- User reviews in Claude, then explicitly asks to submit (if ENABLE_WRITE_TOOLS is on)
-- Could also save drafts locally in `~/.canvas-mcp/drafts/`
+### High Priority
+- [ ] Consolidate overlapping upcoming-work tools (5 tools → 2-3)
+- [ ] Score statistics in assignment data (class mean/min/max)
+- [ ] Late penalty info surfaced (points_deducted, late_policy_status)
 
-### 8. Quiz/Exam Preparation Assistant
-**Why**: Students want help studying for specific exams.
+### Medium Priority
+- [ ] Assignment group drop rules in grade calculations
+- [ ] Course nickname mapping (student-defined aliases)
+- [ ] Page body previews in list_pages
+- [ ] Discussion full reply threading (fetch_all_replies option)
+- [ ] Unread filtering for discussions and announcements
+- [ ] Group/collaboration support (Canvas Groups API)
 
-**Plan**:
-- Enhance `study_plan` prompt to automatically gather all relevant materials
-- Scan module items for the relevant date range
-- Read lecture notes, assignment descriptions, and page content
-- Generate practice questions based on course material
-- Track study progress in local storage
-
-### 9. Multi-Course Dashboard Comparison
-**Why**: Students juggle 4-6 courses and need to prioritize.
-
-**Plan**:
-- Add a `course_priority_report` tool
-- Factors: upcoming deadlines, missing work, grade trajectory, points at stake
-- "Focus on BIO 152 — you have a 50-point lab report due tomorrow and your grade is at 78%"
-
-### 10. Canvas GraphQL Integration
-**Why**: Canvas is adding more GraphQL endpoints. Some queries are more efficient via GraphQL.
-
-**Plan**:
-- Add a GraphQL client alongside REST
-- Use for queries that benefit from selective field fetching
-- Particularly useful for dashboard (one query vs many REST calls)
-- Canvas GraphQL is at `/api/graphql`
+### Low Priority
+- [ ] Pagination controls on list tools (limit/offset)
+- [ ] GraphQL integration for more efficient queries
+- [ ] Streaming for large file downloads
+- [ ] Rate limiter (token bucket pattern) for proactive rate management
 
 ## Technical Debt
-
 - [ ] Add unit tests (at least for utils.ts and canvas-client.ts)
-- [ ] Add integration test that verifies MCP protocol compliance
-- [ ] Consider streaming for large file downloads instead of buffering
-- [ ] Add PDF parsing timeout (AbortController around pdf-parse)
-- [ ] Validate HTML entity numeric ranges in stripHtmlTags
-- [ ] Add search term length limits across all tools
-- [ ] Consider rate limiter in canvas-client.ts (token bucket pattern)
-- [ ] Update @modelcontextprotocol/sdk when v2 stabilizes (registerTool/registerResource/registerPrompt API)
+- [ ] Add integration test for MCP protocol compliance
+- [ ] Add ESLint configuration
+- [ ] Add CI/CD pipeline
+- [ ] Consider removing redundant get_rubric tool (get_assignment already includes rubric)

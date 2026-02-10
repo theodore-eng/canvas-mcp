@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getCanvasClient } from '../canvas-client.js';
-import { formatError, formatSuccess, stripHtmlTags } from '../utils.js';
+import { formatError, formatSuccess, stripHtmlTags, formatPlannerItem, sortByDueDate } from '../utils.js';
 
 export function registerDashboardTools(server: McpServer) {
   const client = getCanvasClient();
@@ -15,10 +15,9 @@ export function registerDashboardTools(server: McpServer) {
     },
     async ({ days_ahead }) => {
       try {
-        const today = new Date();
-        const todayStr = today.toISOString().split('T')[0];
+        const todayStr = client.getLocalDateString();
         const futureDate = new Date(Date.now() + days_ahead * 24 * 60 * 60 * 1000);
-        const futureDateStr = futureDate.toISOString().split('T')[0];
+        const futureDateStr = client.getLocalDateString(futureDate);
 
         // Fetch all data in parallel for speed — use allSettled so partial failures don't kill the briefing
         const [coursesResult, todosResult, plannerResult] = await Promise.allSettled([
@@ -39,6 +38,9 @@ export function registerDashboardTools(server: McpServer) {
         const todos = todosResult.status === 'fulfilled' ? todosResult.value : [];
         const plannerItems = plannerResult.status === 'fulfilled' ? plannerResult.value : [];
 
+        // Build course name lookup for resolving context codes
+        const courseNameMap = new Map(courses.map(c => [`course_${c.id}`, c.name]));
+
         const warnings: string[] = [];
         if (coursesResult.status === 'rejected') warnings.push('Could not load courses');
         if (todosResult.status === 'rejected') warnings.push('Could not load todo items');
@@ -46,8 +48,8 @@ export function registerDashboardTools(server: McpServer) {
 
         // Fetch calendar events and announcements (need course IDs first)
         const contextCodes = courses.map(c => `course_${c.id}`);
-        const tomorrowStr = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-        const weekAgoStr = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        const tomorrowStr = client.getLocalDateString(new Date(Date.now() + 24 * 60 * 60 * 1000));
+        const weekAgoStr = client.getLocalDateString(new Date(Date.now() - 7 * 24 * 60 * 60 * 1000));
 
         const [eventsResult, announcementsResult] = await Promise.allSettled([
           contextCodes.length > 0
@@ -100,31 +102,10 @@ export function registerDashboardTools(server: McpServer) {
           return new Date(a.start_at).getTime() - new Date(b.start_at).getTime();
         });
 
-        // Format upcoming planner items
-        const upcomingWork = plannerItems.map(item => {
-          const plannable = item.plannable;
-          const dueDate = plannable.due_at || plannable.todo_date || null;
-          return {
-            type: item.plannable_type,
-            title: plannable.title || plannable.name || 'Untitled',
-            course: item.context_name ?? `course_${item.course_id}`,
-            due_at: dueDate,
-            days_until_due: dueDate
-              ? Math.ceil((new Date(dueDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24))
-              : null,
-            points_possible: plannable.points_possible ?? null,
-            submitted: item.submissions && typeof item.submissions === 'object'
-              ? (item.submissions.graded || false)
-              : false,
-            missing: item.submissions && typeof item.submissions === 'object'
-              ? item.submissions.missing
-              : false,
-          };
-        }).sort((a, b) => {
-          if (!a.due_at) return 1;
-          if (!b.due_at) return -1;
-          return new Date(a.due_at).getTime() - new Date(b.due_at).getTime();
-        });
+        // Format upcoming planner items using shared utility
+        const upcomingWork = sortByDueDate(plannerItems.map(item =>
+          formatPlannerItem(item, courseNameMap.get(`course_${item.course_id}`))
+        ));
 
         // Format todo items
         const todoItems = todos.map(item => ({
@@ -139,7 +120,7 @@ export function registerDashboardTools(server: McpServer) {
           title: ann.title,
           author: ann.user_name,
           posted_at: ann.posted_at,
-          course: ann.context_code,
+          course: courseNameMap.get(ann.context_code) ?? ann.context_code,
           preview: stripHtmlTags(ann.message).substring(0, 200),
         }));
 

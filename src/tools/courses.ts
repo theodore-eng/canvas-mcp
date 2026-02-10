@@ -45,9 +45,37 @@ export function registerCourseTools(server: McpServer) {
             : undefined,
         }));
 
-        return formatSuccess(formattedCourses);
+        return formatSuccess({ count: formattedCourses.length, courses: formattedCourses });
       } catch (error) {
         return formatError('listing courses', error);
+      }
+    }
+  );
+
+  server.tool(
+    'get_course_syllabus',
+    'Get the full syllabus for a course. The syllabus is the source of truth for grading policies, letter grade scales, late penalties, drop rules, extra credit, office hours, course schedule, and exam dates. Always check the syllabus before answering questions about how a course works.',
+    {
+      course_id: z.number().int().positive().describe('The Canvas course ID'),
+    },
+    async ({ course_id }) => {
+      try {
+        const result = await client.getCourseSyllabus(course_id);
+        if (!result) {
+          return formatSuccess({
+            course_id,
+            syllabus_available: false,
+            message: 'No syllabus has been published for this course.',
+          });
+        }
+        return formatSuccess({
+          course_id,
+          course_name: result.course_name,
+          syllabus_available: true,
+          syllabus: result.text,
+        });
+      } catch (error) {
+        return formatError('getting course syllabus', error);
       }
     }
   );
@@ -56,7 +84,7 @@ export function registerCourseTools(server: McpServer) {
     'get_course',
     'Get detailed information about a specific course including syllabus, progress, and term',
     {
-      course_id: z.number().describe('The Canvas course ID'),
+      course_id: z.number().int().positive().describe('The Canvas course ID'),
       include_syllabus: z.boolean().optional().default(true)
         .describe('Include syllabus body in response'),
     },
