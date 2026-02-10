@@ -83,7 +83,7 @@ export interface Assignment {
   omit_from_final_grade: boolean;
 }
 
-export type SubmissionType = 
+export type SubmissionType =
   | 'online_text_entry'
   | 'online_url'
   | 'online_upload'
@@ -95,7 +95,7 @@ export type SubmissionType =
   | 'on_paper'
   | 'none';
 
-export type GradingType = 
+export type GradingType =
   | 'pass_fail'
   | 'percent'
   | 'letter_grade'
@@ -203,6 +203,80 @@ export interface FileAttachment {
   updated_at: string;
 }
 
+// Canvas File object (from the Files API)
+export interface CanvasFile {
+  id: number;
+  uuid: string;
+  folder_id: number;
+  display_name: string;
+  filename: string;
+  'content-type': string;
+  url: string;
+  size: number;
+  created_at: string;
+  updated_at: string;
+  unlock_at: string | null;
+  locked: boolean;
+  hidden: boolean;
+  lock_at: string | null;
+  hidden_for_user: boolean;
+  thumbnail_url: string | null;
+  modified_at: string;
+  mime_class: string;
+  media_entry_id: string | null;
+  locked_for_user: boolean;
+  preview_url?: string;
+}
+
+// Canvas Page object (from the Pages/Wiki API)
+export interface Page {
+  page_id: number;
+  url: string;
+  title: string;
+  body?: string;
+  created_at: string;
+  updated_at: string;
+  editing_roles: string;
+  last_edited_by?: User;
+  published: boolean;
+  front_page: boolean;
+  locked_for_user: boolean;
+  lock_explanation?: string;
+}
+
+// Canvas Calendar Event
+export interface CalendarEvent {
+  id: number;
+  title: string;
+  description: string | null;
+  start_at: string | null;
+  end_at: string | null;
+  location_name: string | null;
+  location_address: string | null;
+  context_code: string;
+  context_name?: string;
+  workflow_state: 'active' | 'locked' | 'deleted';
+  all_day: boolean;
+  all_day_date: string | null;
+  html_url: string;
+  type: 'event' | 'assignment';
+  assignment?: Assignment;
+}
+
+// Canvas Todo Item
+export interface TodoItem {
+  type: string;
+  assignment?: Assignment;
+  quiz?: { id: number; title: string; html_url: string };
+  ignore: string;
+  ignore_permanently: string;
+  html_url: string;
+  needs_grading_count?: number;
+  context_type: string;
+  course_id: number;
+  context_name?: string;
+}
+
 export interface Module {
   id: number;
   name: string;
@@ -237,7 +311,7 @@ export interface ModuleItem {
   published?: boolean;
 }
 
-export type ModuleItemType = 
+export type ModuleItemType =
   | 'File'
   | 'Page'
   | 'Discussion'
@@ -361,7 +435,7 @@ export interface ListCoursesParams {
   enrollment_type?: 'teacher' | 'student' | 'ta' | 'observer' | 'designer';
   enrollment_state?: 'active' | 'invited_or_pending' | 'completed';
   state?: ('unpublished' | 'available' | 'completed' | 'deleted')[];
-  include?: ('needs_grading_count' | 'syllabus_body' | 'total_scores' | 'term' | 'course_progress' | 'sections' | 'total_students')[];
+  include?: ('needs_grading_count' | 'syllabus_body' | 'total_scores' | 'term' | 'course_progress' | 'sections' | 'total_students' | 'current_grading_period_scores')[];
 }
 
 export interface ListAssignmentsParams {
@@ -384,4 +458,27 @@ export interface ListAnnouncementsParams {
   end_date?: string;
   active_only?: boolean;
   latest_only?: boolean;
+}
+
+export interface ListFilesParams {
+  content_types?: string[];
+  search_term?: string;
+  sort?: 'name' | 'size' | 'created_at' | 'updated_at' | 'content_type';
+  order?: 'asc' | 'desc';
+}
+
+export interface ListPagesParams {
+  sort?: 'title' | 'created_at' | 'updated_at';
+  order?: 'asc' | 'desc';
+  search_term?: string;
+  published?: boolean;
+}
+
+export interface ListCalendarEventsParams {
+  type?: 'event' | 'assignment';
+  context_codes?: string[];
+  start_date?: string;
+  end_date?: string;
+  all_events?: boolean;
+  undated?: boolean;
 }

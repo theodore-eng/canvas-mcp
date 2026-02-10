@@ -5,9 +5,10 @@ import { getCanvasClient } from '../canvas-client.js';
 export function registerDiscussionTools(server: McpServer) {
   const client = getCanvasClient();
 
-  // List discussion topics for a course
+  // Read tools — always registered
   server.tool(
     'list_discussions',
+    'List discussion topics in a course, sorted by position, recent activity, or title',
     {
       course_id: z.number().describe('The Canvas course ID'),
       order_by: z.enum(['position', 'recent_activity', 'title']).optional()
@@ -53,19 +54,16 @@ export function registerDiscussionTools(server: McpServer) {
     }
   );
 
-  // Get discussion entries/replies
   server.tool(
     'get_discussion_entries',
+    'Read the posts and replies in a discussion topic',
     {
       course_id: z.number().describe('The Canvas course ID'),
       topic_id: z.number().describe('The discussion topic ID'),
     },
     async ({ course_id, topic_id }) => {
       try {
-        // Get the topic details first
         const topic = await client.getDiscussionTopic(course_id, topic_id);
-        
-        // Get the entries
         const entries = await client.listDiscussionEntries(course_id, topic_id);
 
         const result = {
@@ -111,87 +109,90 @@ export function registerDiscussionTools(server: McpServer) {
     }
   );
 
-  // Post to a discussion
-  server.tool(
-    'post_discussion_entry',
-    {
-      course_id: z.number().describe('The Canvas course ID'),
-      topic_id: z.number().describe('The discussion topic ID'),
-      message: z.string().describe('The message to post (supports HTML)'),
-    },
-    async ({ course_id, topic_id, message }) => {
-      try {
-        const entry = await client.postDiscussionEntry(course_id, topic_id, message);
+  // Write tools — only registered when ENABLE_WRITE_TOOLS is set
+  if (process.env.ENABLE_WRITE_TOOLS === 'true') {
+    server.tool(
+      'post_discussion_entry',
+      'Post a new entry to a discussion topic',
+      {
+        course_id: z.number().describe('The Canvas course ID'),
+        topic_id: z.number().describe('The discussion topic ID'),
+        message: z.string().describe('The message to post (supports HTML)'),
+      },
+      async ({ course_id, topic_id, message }) => {
+        try {
+          const entry = await client.postDiscussionEntry(course_id, topic_id, message);
 
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              success: true,
-              message: 'Discussion entry posted successfully',
-              entry: {
-                id: entry.id,
-                message: entry.message,
-                created_at: entry.created_at,
-                user_name: entry.user_name,
-              },
-            }, null, 2),
-          }],
-        };
-      } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error posting discussion entry: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                success: true,
+                message: 'Discussion entry posted successfully',
+                entry: {
+                  id: entry.id,
+                  message: entry.message,
+                  created_at: entry.created_at,
+                  user_name: entry.user_name,
+                },
+              }, null, 2),
+            }],
+          };
+        } catch (error) {
+          return {
+            content: [{
+              type: 'text',
+              text: `Error posting discussion entry: ${error instanceof Error ? error.message : String(error)}`,
+            }],
+            isError: true,
+          };
+        }
       }
-    }
-  );
+    );
 
-  // Reply to a discussion entry
-  server.tool(
-    'reply_to_discussion',
-    {
-      course_id: z.number().describe('The Canvas course ID'),
-      topic_id: z.number().describe('The discussion topic ID'),
-      entry_id: z.number().describe('The entry ID to reply to'),
-      message: z.string().describe('The reply message (supports HTML)'),
-    },
-    async ({ course_id, topic_id, entry_id, message }) => {
-      try {
-        const reply = await client.replyToDiscussionEntry(
-          course_id,
-          topic_id,
-          entry_id,
-          message
-        );
+    server.tool(
+      'reply_to_discussion',
+      'Reply to a specific post in a discussion topic',
+      {
+        course_id: z.number().describe('The Canvas course ID'),
+        topic_id: z.number().describe('The discussion topic ID'),
+        entry_id: z.number().describe('The entry ID to reply to'),
+        message: z.string().describe('The reply message (supports HTML)'),
+      },
+      async ({ course_id, topic_id, entry_id, message }) => {
+        try {
+          const reply = await client.replyToDiscussionEntry(
+            course_id,
+            topic_id,
+            entry_id,
+            message
+          );
 
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              success: true,
-              message: 'Reply posted successfully',
-              reply: {
-                id: reply.id,
-                message: reply.message,
-                created_at: reply.created_at,
-                user_name: reply.user_name,
-              },
-            }, null, 2),
-          }],
-        };
-      } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error posting reply: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                success: true,
+                message: 'Reply posted successfully',
+                reply: {
+                  id: reply.id,
+                  message: reply.message,
+                  created_at: reply.created_at,
+                  user_name: reply.user_name,
+                },
+              }, null, 2),
+            }],
+          };
+        } catch (error) {
+          return {
+            content: [{
+              type: 'text',
+              text: `Error posting reply: ${error instanceof Error ? error.message : String(error)}`,
+            }],
+            isError: true,
+          };
+        }
       }
-    }
-  );
+    );
+  }
 }

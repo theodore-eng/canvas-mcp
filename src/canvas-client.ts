@@ -7,11 +7,18 @@ import type {
   Announcement,
   DiscussionTopic,
   DiscussionEntry,
+  CanvasFile,
+  Page,
+  CalendarEvent,
+  TodoItem,
   FileUploadResponse,
   ListCoursesParams,
   ListAssignmentsParams,
   ListModulesParams,
   ListAnnouncementsParams,
+  ListFilesParams,
+  ListPagesParams,
+  ListCalendarEventsParams,
   SubmitAssignmentParams,
   SubmissionType,
 } from './types/canvas.js';
@@ -26,7 +33,7 @@ export class CanvasClient {
   private apiToken: string;
 
   constructor(config: CanvasClientConfig) {
-    this.baseUrl = config.baseUrl.replace(/\/$/, ''); // Remove trailing slash
+    this.baseUrl = config.baseUrl.replace(/\/$/, '');
     this.apiToken = config.apiToken;
   }
 
@@ -34,11 +41,15 @@ export class CanvasClient {
     endpoint: string,
     options: RequestInit = {}
   ): Promise<T> {
-    const url = `${this.baseUrl}/api/v1${endpoint}`;
-    
+    const url = endpoint.startsWith('http')
+      ? endpoint
+      : `${this.baseUrl}/api/v1${endpoint}`;
+
     const headers: HeadersInit = {
       'Authorization': `Bearer ${this.apiToken}`,
-      'Content-Type': 'application/json',
+      ...(options.method === 'POST' || options.method === 'PUT'
+        ? { 'Content-Type': 'application/json' }
+        : {}),
       ...options.headers,
     };
 
@@ -57,19 +68,70 @@ export class CanvasClient {
     return response.json() as Promise<T>;
   }
 
+  // Paginated request that follows Link headers and collects all pages
+  private async requestPaginated<T>(
+    endpoint: string,
+    options: RequestInit = {}
+  ): Promise<T[]> {
+    const results: T[] = [];
+    let url: string | null = endpoint.startsWith('http')
+      ? endpoint
+      : `${this.baseUrl}/api/v1${endpoint}`;
+
+    // Ensure per_page=100 is set
+    if (!url.includes('per_page=')) {
+      url += url.includes('?') ? '&per_page=100' : '?per_page=100';
+    }
+
+    while (url) {
+      const headers: HeadersInit = {
+        'Authorization': `Bearer ${this.apiToken}`,
+        ...options.headers,
+      };
+
+      const response = await fetch(url, { ...options, headers });
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        throw new Error(
+          `Canvas API error: ${response.status} ${response.statusText} - ${errorBody}`
+        );
+      }
+
+      const data = await response.json() as T[];
+      results.push(...data);
+
+      // Parse Link header for next page
+      url = this.getNextPageUrl(response.headers.get('Link'));
+    }
+
+    return results;
+  }
+
+  private getNextPageUrl(linkHeader: string | null): string | null {
+    if (!linkHeader) return null;
+
+    const links = linkHeader.split(',');
+    for (const link of links) {
+      const match = link.match(/<([^>]+)>;\s*rel="next"/);
+      if (match) return match[1];
+    }
+    return null;
+  }
+
   private buildQueryString(params: object): string {
     const searchParams = new URLSearchParams();
-    
+
     for (const [key, value] of Object.entries(params)) {
       if (value === undefined || value === null) continue;
-      
+
       if (Array.isArray(value)) {
         value.forEach(v => searchParams.append(`${key}[]`, String(v)));
       } else {
         searchParams.append(key, String(value));
       }
     }
-    
+
     const queryString = searchParams.toString();
     return queryString ? `?${queryString}` : '';
   }
@@ -78,7 +140,7 @@ export class CanvasClient {
 
   async listCourses(params: ListCoursesParams = {}): Promise<Course[]> {
     const query = this.buildQueryString(params);
-    return this.request<Course[]>(`/courses${query}`);
+    return this.requestPaginated<Course>(`/courses${query}`);
   }
 
   async getCourse(courseId: number, include?: string[]): Promise<Course> {
@@ -93,7 +155,7 @@ export class CanvasClient {
     params: ListAssignmentsParams = {}
   ): Promise<Assignment[]> {
     const query = this.buildQueryString(params);
-    return this.request<Assignment[]>(
+    return this.requestPaginated<Assignment>(
       `/courses/${courseId}/assignments${query}`
     );
   }
@@ -183,13 +245,11 @@ export class CanvasClient {
     contentType: string
   ): Promise<{ id: number; url: string }> {
     const formData = new FormData();
-    
-    // Add all upload params from Canvas
+
     for (const [key, value] of Object.entries(uploadParams)) {
       formData.append(key, value);
     }
-    
-    // Convert to ArrayBuffer for Blob compatibility
+
     let arrayBuffer: ArrayBuffer;
     if (typeof fileContent === 'string') {
       const encoder = new TextEncoder();
@@ -200,8 +260,7 @@ export class CanvasClient {
         fileContent.byteOffset + fileContent.byteLength
       ) as ArrayBuffer;
     }
-    
-    // Add the file
+
     const blob = new Blob([arrayBuffer], { type: contentType });
     formData.append('file', blob, fileName);
 
@@ -218,6 +277,46 @@ export class CanvasClient {
     return response.json();
   }
 
+  // ==================== FILES (READING/DOWNLOADING) ====================
+
+  async listCourseFiles(
+    courseId: number,
+    params: ListFilesParams = {}
+  ): Promise<CanvasFile[]> {
+    const query = this.buildQueryString(params);
+    return this.requestPaginated<CanvasFile>(`/courses/${courseId}/files${query}`);
+  }
+
+  async getFile(fileId: number): Promise<CanvasFile> {
+    return this.request<CanvasFile>(`/files/${fileId}`);
+  }
+
+  async downloadFile(downloadUrl: string): Promise<ArrayBuffer> {
+    // Canvas file URLs redirect to pre-signed S3 URLs.
+    // We must NOT send the Bearer token on the redirect.
+    const response = await fetch(downloadUrl, { redirect: 'follow' });
+
+    if (!response.ok) {
+      throw new Error(`File download error: ${response.status} ${response.statusText}`);
+    }
+
+    return response.arrayBuffer();
+  }
+
+  // ==================== PAGES ====================
+
+  async listPages(
+    courseId: number,
+    params: ListPagesParams = {}
+  ): Promise<Page[]> {
+    const query = this.buildQueryString(params);
+    return this.requestPaginated<Page>(`/courses/${courseId}/pages${query}`);
+  }
+
+  async getPage(courseId: number, pageUrlOrId: string): Promise<Page> {
+    return this.request<Page>(`/courses/${courseId}/pages/${pageUrlOrId}`);
+  }
+
   // ==================== MODULES ====================
 
   async listModules(
@@ -225,7 +324,7 @@ export class CanvasClient {
     params: ListModulesParams = {}
   ): Promise<Module[]> {
     const query = this.buildQueryString(params);
-    return this.request<Module[]>(`/courses/${courseId}/modules${query}`);
+    return this.requestPaginated<Module>(`/courses/${courseId}/modules${query}`);
   }
 
   async getModule(
@@ -245,7 +344,7 @@ export class CanvasClient {
     include?: string[]
   ): Promise<ModuleItem[]> {
     const query = include ? this.buildQueryString({ include }) : '';
-    return this.request<ModuleItem[]>(
+    return this.requestPaginated<ModuleItem>(
       `/courses/${courseId}/modules/${moduleId}/items${query}`
     );
   }
@@ -256,7 +355,7 @@ export class CanvasClient {
     params: ListAnnouncementsParams
   ): Promise<Announcement[]> {
     const query = this.buildQueryString(params);
-    return this.request<Announcement[]>(`/announcements${query}`);
+    return this.requestPaginated<Announcement>(`/announcements${query}`);
   }
 
   // ==================== DISCUSSIONS ====================
@@ -266,7 +365,7 @@ export class CanvasClient {
     orderBy?: 'position' | 'recent_activity' | 'title'
   ): Promise<DiscussionTopic[]> {
     const query = orderBy ? this.buildQueryString({ order_by: orderBy }) : '';
-    return this.request<DiscussionTopic[]>(
+    return this.requestPaginated<DiscussionTopic>(
       `/courses/${courseId}/discussion_topics${query}`
     );
   }
@@ -284,7 +383,7 @@ export class CanvasClient {
     courseId: number,
     topicId: number
   ): Promise<DiscussionEntry[]> {
-    return this.request<DiscussionEntry[]>(
+    return this.requestPaginated<DiscussionEntry>(
       `/courses/${courseId}/discussion_topics/${topicId}/entries`
     );
   }
@@ -331,19 +430,32 @@ export class CanvasClient {
     );
   }
 
+  // ==================== CALENDAR ====================
+
+  async listCalendarEvents(
+    params: ListCalendarEventsParams = {}
+  ): Promise<CalendarEvent[]> {
+    const query = this.buildQueryString(params);
+    return this.requestPaginated<CalendarEvent>(`/calendar_events${query}`);
+  }
+
+  // ==================== TODO ====================
+
+  async getTodoItems(): Promise<TodoItem[]> {
+    return this.requestPaginated<TodoItem>('/users/self/todo');
+  }
+
   // ==================== SEARCH / UTILITY ====================
 
   async searchCourseContent(
     courseId: number,
     searchTerm: string
   ): Promise<{ modules: Module[]; assignments: Assignment[] }> {
-    // Search modules
     const modules = await this.listModules(courseId, {
       search_term: searchTerm,
       include: ['items'],
     });
 
-    // Search assignments
     const assignments = await this.listAssignments(courseId, {
       search_term: searchTerm,
     });

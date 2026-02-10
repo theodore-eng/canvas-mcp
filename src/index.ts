@@ -14,12 +14,17 @@ import { registerSubmissionTools } from './tools/submissions.js';
 import { registerModuleTools } from './tools/modules.js';
 import { registerDiscussionTools } from './tools/discussions.js';
 import { registerSearchTools } from './tools/search.js';
+import { registerGradeTools } from './tools/grades.js';
+import { registerTodoTools } from './tools/todos.js';
+import { registerPageTools } from './tools/pages.js';
+import { registerCalendarTools } from './tools/calendar.js';
+import { registerFileTools } from './tools/files.js';
 
 // Validate required environment variables
 function validateEnvironment(): void {
   const requiredVars = ['CANVAS_API_TOKEN', 'CANVAS_BASE_URL'];
   const missing = requiredVars.filter(v => !process.env[v]);
-  
+
   if (missing.length > 0) {
     console.error(`Error: Missing required environment variables: ${missing.join(', ')}`);
     console.error('Please set these variables in your environment or .env file.');
@@ -46,13 +51,18 @@ async function main(): Promise<void> {
     version: '1.0.0',
   });
 
-  // Register all tools
+  // Register all read tools (always active)
   registerCourseTools(server);
   registerAssignmentTools(server);
-  registerSubmissionTools(server);
+  registerSubmissionTools(server);     // write tools gated internally
   registerModuleTools(server);
-  registerDiscussionTools(server);
+  registerDiscussionTools(server);     // write tools gated internally
   registerSearchTools(server);
+  registerGradeTools(server);
+  registerTodoTools(server);
+  registerPageTools(server);
+  registerCalendarTools(server);
+  registerFileTools(server);
 
   // Create stdio transport and connect
   const transport = new StdioServerTransport();
@@ -61,6 +71,11 @@ async function main(): Promise<void> {
   // Log startup (to stderr to not interfere with MCP protocol on stdout)
   console.error('Canvas LMS MCP Server started successfully');
   console.error(`Connected to: ${process.env.CANVAS_BASE_URL}`);
+  if (process.env.ENABLE_WRITE_TOOLS === 'true') {
+    console.error('Write tools: ENABLED (submit_assignment, upload_file, post_discussion_entry, reply_to_discussion)');
+  } else {
+    console.error('Write tools: DISABLED (set ENABLE_WRITE_TOOLS=true to enable)');
+  }
 }
 
 // Run the server

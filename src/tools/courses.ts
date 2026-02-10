@@ -5,9 +5,9 @@ import { getCanvasClient } from '../canvas-client.js';
 export function registerCourseTools(server: McpServer) {
   const client = getCanvasClient();
 
-  // List all courses for the authenticated user
   server.tool(
     'list_courses',
+    'List all your enrolled Canvas courses with term info and student count',
     {
       enrollment_type: z.enum(['teacher', 'student', 'ta', 'observer', 'designer']).optional()
         .describe('Filter by enrollment type'),
@@ -60,9 +60,9 @@ export function registerCourseTools(server: McpServer) {
     }
   );
 
-  // Get details for a specific course
   server.tool(
     'get_course',
+    'Get detailed information about a specific course including syllabus, progress, and term',
     {
       course_id: z.number().describe('The Canvas course ID'),
       include_syllabus: z.boolean().optional().default(true)

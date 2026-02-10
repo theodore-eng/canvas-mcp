@@ -5,9 +5,9 @@ import { getCanvasClient } from '../canvas-client.js';
 export function registerAssignmentTools(server: McpServer) {
   const client = getCanvasClient();
 
-  // List assignments for a course
   server.tool(
     'list_assignments',
+    'List assignments in a course with submission status and grades. Can filter by status bucket (upcoming, overdue, etc.)',
     {
       course_id: z.number().describe('The Canvas course ID'),
       bucket: z.enum(['past', 'overdue', 'undated', 'ungraded', 'unsubmitted', 'upcoming', 'future']).optional()
@@ -63,9 +63,9 @@ export function registerAssignmentTools(server: McpServer) {
     }
   );
 
-  // Get detailed information about a specific assignment
   server.tool(
     'get_assignment',
+    'Get full details about a specific assignment including description, rubric, and your submission status',
     {
       course_id: z.number().describe('The Canvas course ID'),
       assignment_id: z.number().describe('The assignment ID'),
@@ -75,7 +75,7 @@ export function registerAssignmentTools(server: McpServer) {
     async ({ course_id, assignment_id, include_rubric }) => {
       try {
         const include = ['submission'];
-        
+
         const assignment = await client.getAssignment(course_id, assignment_id, include);
 
         const result: Record<string, unknown> = {
@@ -142,9 +142,9 @@ export function registerAssignmentTools(server: McpServer) {
     }
   );
 
-  // Get rubric for an assignment
   server.tool(
     'get_rubric',
+    'Get the grading rubric for an assignment — shows criteria, point values, and rating descriptions',
     {
       course_id: z.number().describe('The Canvas course ID'),
       assignment_id: z.number().describe('The assignment ID to get rubric for'),

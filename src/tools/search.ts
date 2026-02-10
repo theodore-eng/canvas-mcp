@@ -5,9 +5,9 @@ import { getCanvasClient } from '../canvas-client.js';
 export function registerSearchTools(server: McpServer) {
   const client = getCanvasClient();
 
-  // Find assignments by due date range
   server.tool(
     'find_assignments_by_due_date',
+    'Find assignments in a course that are due within a specific date range',
     {
       course_id: z.number().describe('The Canvas course ID'),
       start_date: z.string().describe('Start date (ISO 8601 format, e.g., 2024-01-01)'),
@@ -66,9 +66,9 @@ export function registerSearchTools(server: McpServer) {
     }
   );
 
-  // Get upcoming assignments (due within specified days)
   server.tool(
     'get_upcoming_assignments',
+    'Get assignments due soon in a specific course (default: next 7 days)',
     {
       course_id: z.number().describe('The Canvas course ID'),
       days_ahead: z.number().optional().default(7)
@@ -89,7 +89,6 @@ export function registerSearchTools(server: McpServer) {
           html_url: a.html_url,
         }));
 
-        // Sort by due date
         formattedAssignments.sort((a, b) => {
           if (!a.due_at) return 1;
           if (!b.due_at) return -1;
@@ -118,9 +117,9 @@ export function registerSearchTools(server: McpServer) {
     }
   );
 
-  // Get overdue assignments
   server.tool(
     'get_overdue_assignments',
+    'Get assignments that are past due and not yet submitted in a course',
     {
       course_id: z.number().describe('The Canvas course ID'),
     },
@@ -138,7 +137,6 @@ export function registerSearchTools(server: McpServer) {
           html_url: a.html_url,
         }));
 
-        // Sort by how overdue (most overdue first)
         formattedAssignments.sort((a, b) => (b.days_overdue || 0) - (a.days_overdue || 0));
 
         return {
@@ -162,9 +160,9 @@ export function registerSearchTools(server: McpServer) {
     }
   );
 
-  // Search course content (modules and assignments)
   server.tool(
     'search_course_content',
+    'Search through a course\'s modules and assignments by keyword',
     {
       course_id: z.number().describe('The Canvas course ID'),
       search_term: z.string().describe('Search term to find in modules and assignments'),
@@ -178,7 +176,7 @@ export function registerSearchTools(server: McpServer) {
           modules: results.modules.map(mod => ({
             id: mod.id,
             name: mod.name,
-            items: mod.items?.filter(item => 
+            items: mod.items?.filter(item =>
               item.title.toLowerCase().includes(search_term.toLowerCase())
             ).map(item => ({
               id: item.id,
@@ -214,22 +212,28 @@ export function registerSearchTools(server: McpServer) {
     }
   );
 
-  // Get all assignments across multiple courses (useful for students with many classes)
   server.tool(
     'get_all_upcoming_work',
+    'Get all upcoming assignments across ALL your courses at once — the best way to see everything due soon',
     {
       days_ahead: z.number().optional().default(7)
         .describe('Number of days to look ahead (default: 7)'),
     },
     async ({ days_ahead }) => {
       try {
-        // First get all active courses
         const courses = await client.listCourses({
           enrollment_state: 'active',
           state: ['available'],
         });
 
-        // Collect assignments from all courses
+        // Fetch assignments from all courses in parallel
+        const results = await Promise.allSettled(
+          courses.map(async (course) => {
+            const assignments = await client.getUpcomingAssignments(course.id, days_ahead);
+            return { course, assignments };
+          })
+        );
+
         const allAssignments: Array<{
           course_id: number;
           course_name: string;
@@ -245,10 +249,11 @@ export function registerSearchTools(server: McpServer) {
           };
         }> = [];
 
-        for (const course of courses) {
-          try {
-            const assignments = await client.getUpcomingAssignments(course.id, days_ahead);
-            
+        const failedCourses: string[] = [];
+
+        for (const result of results) {
+          if (result.status === 'fulfilled') {
+            const { course, assignments } = result.value;
             for (const a of assignments) {
               allAssignments.push({
                 course_id: course.id,
@@ -265,9 +270,8 @@ export function registerSearchTools(server: McpServer) {
                 },
               });
             }
-          } catch {
-            // Skip courses where we can't fetch assignments
-            continue;
+          } else {
+            failedCourses.push(result.reason?.message ?? 'Unknown error');
           }
         }
 
@@ -285,6 +289,7 @@ export function registerSearchTools(server: McpServer) {
               looking_ahead_days: days_ahead,
               total_count: allAssignments.length,
               courses_checked: courses.length,
+              ...(failedCourses.length > 0 ? { courses_failed: failedCourses } : {}),
               assignments: allAssignments,
             }, null, 2),
           }],
