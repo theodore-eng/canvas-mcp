@@ -16,23 +16,45 @@ export function registerPageTools(server: McpServer) {
     },
     async ({ course_id, search_term, sort }) => {
       try {
-        const pages = await client.listPages(course_id, {
-          search_term,
-          sort,
-          published: true,
-        });
+        let pages: Array<{ page_id: number; url: string; title: string; updated_at: string; front_page: boolean }>;
 
-        const formattedPages = pages.map(page => ({
-          page_id: page.page_id,
-          url: page.url,
-          title: page.title,
-          updated_at: page.updated_at,
-          front_page: page.front_page,
-        }));
+        try {
+          // Try the direct Pages API first
+          const directPages = await client.listPages(course_id, {
+            search_term,
+            sort,
+            published: true,
+          });
+
+          pages = directPages.map(page => ({
+            page_id: page.page_id,
+            url: page.url,
+            title: page.title,
+            updated_at: page.updated_at,
+            front_page: page.front_page,
+          }));
+        } catch {
+          // Pages API disabled — fall back to scanning modules for Page items
+          const modules = await client.listModules(course_id, { include: ['items'] });
+          const pageItems = modules.flatMap(m => m.items?.filter(i => i.type === 'Page') ?? []);
+
+          // Apply search filter if provided
+          const filtered = search_term
+            ? pageItems.filter(i => i.title.toLowerCase().includes(search_term.toLowerCase()))
+            : pageItems;
+
+          pages = filtered.map(item => ({
+            page_id: item.content_id ?? item.id,
+            url: item.page_url ?? '',
+            title: item.title,
+            updated_at: '',
+            front_page: false,
+          }));
+        }
 
         return formatSuccess({
-          count: formattedPages.length,
-          pages: formattedPages,
+          count: pages.length,
+          pages,
         });
       } catch (error) {
         return formatError('listing pages', error);

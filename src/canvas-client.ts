@@ -36,6 +36,7 @@ import type {
   ListFoldersParams,
   ActivityStreamItem,
   ActivityStreamSummary,
+  Tab,
 } from './types/canvas.js';
 
 interface CanvasClientConfig {
@@ -346,6 +347,18 @@ export class CanvasClient {
     const result = { text: stripHtmlTags(course.syllabus_body), course_name: course.name };
     this.setCached(cacheKey, { value: result }, 600_000); // 10 min TTL
     return result;
+  }
+
+  // ==================== TABS ====================
+
+  async listCourseTabs(courseId: number): Promise<Tab[]> {
+    const cacheKey = `tabs:${courseId}`;
+    const cached = this.getCached<Tab[]>(cacheKey);
+    if (cached) return cached;
+
+    const tabs = await this.requestPaginated<Tab>(`/courses/${courseId}/tabs`);
+    this.setCached(cacheKey, tabs);
+    return tabs;
   }
 
   // ==================== ASSIGNMENT GROUPS ====================
@@ -854,11 +867,46 @@ export class CanvasClient {
       (d.message && d.message.toLowerCase().includes(lowerTerm))
     );
 
+    // Supplement pages/files from module items when direct APIs failed
+    const directPagesFailed = pages.status === 'rejected';
+    const directFilesFailed = files.status === 'rejected';
+
+    const supplementalPages: Page[] = [];
+    const supplementalFiles: CanvasFile[] = [];
+
+    if (directPagesFailed || directFilesFailed) {
+      for (const mod of allModules) {
+        if (!mod.items) continue;
+        for (const item of mod.items) {
+          if (directPagesFailed && item.type === 'Page' && item.title.toLowerCase().includes(lowerTerm)) {
+            supplementalPages.push({
+              page_id: item.content_id ?? item.id,
+              url: item.page_url ?? '',
+              title: item.title,
+              created_at: '',
+              updated_at: '',
+              editing_roles: '',
+              published: true,
+              front_page: false,
+              locked_for_user: false,
+            } as Page);
+          }
+          if (directFilesFailed && item.type === 'File' && item.title.toLowerCase().includes(lowerTerm)) {
+            supplementalFiles.push({
+              id: item.content_id ?? item.id,
+              display_name: item.title,
+              filename: item.title,
+            } as unknown as CanvasFile);
+          }
+        }
+      }
+    }
+
     return {
       modules: filteredModules,
       assignments: assignments.status === 'fulfilled' ? assignments.value : [],
-      pages: pages.status === 'fulfilled' ? pages.value : [],
-      files: files.status === 'fulfilled' ? files.value : [],
+      pages: pages.status === 'fulfilled' ? pages.value : supplementalPages,
+      files: files.status === 'fulfilled' ? files.value : supplementalFiles,
       discussions: filteredDiscussions,
     };
   }

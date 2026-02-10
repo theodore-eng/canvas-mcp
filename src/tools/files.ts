@@ -27,22 +27,51 @@ export function registerFileTools(server: McpServer) {
     },
     async ({ course_id, content_type, search_term, sort }) => {
       try {
-        const files = await client.listCourseFiles(course_id, {
-          content_types: content_type ? [content_type] : undefined,
-          search_term,
-          sort,
-        });
+        let formattedFiles: Array<{
+          id: number;
+          display_name: string;
+          filename: string;
+          content_type?: string;
+          size_bytes?: number;
+          size_human?: string;
+          updated_at?: string;
+          mime_class?: string;
+        }>;
 
-        const formattedFiles = files.map(f => ({
-          id: f.id,
-          display_name: f.display_name,
-          filename: f.filename,
-          content_type: f['content-type'],
-          size_bytes: f.size,
-          size_human: formatFileSize(f.size),
-          updated_at: f.updated_at,
-          mime_class: f.mime_class,
-        }));
+        try {
+          // Try the direct Files API first
+          const files = await client.listCourseFiles(course_id, {
+            content_types: content_type ? [content_type] : undefined,
+            search_term,
+            sort,
+          });
+
+          formattedFiles = files.map(f => ({
+            id: f.id,
+            display_name: f.display_name,
+            filename: f.filename,
+            content_type: f['content-type'],
+            size_bytes: f.size,
+            size_human: formatFileSize(f.size),
+            updated_at: f.updated_at,
+            mime_class: f.mime_class,
+          }));
+        } catch {
+          // Files API unauthorized — fall back to scanning modules for File items
+          const modules = await client.listModules(course_id, { include: ['items'] });
+          const fileItems = modules.flatMap(m => m.items?.filter(i => i.type === 'File') ?? []);
+
+          // Apply search filter if provided
+          const filtered = search_term
+            ? fileItems.filter(i => i.title.toLowerCase().includes(search_term.toLowerCase()))
+            : fileItems;
+
+          formattedFiles = filtered.map(item => ({
+            id: item.content_id ?? item.id,
+            display_name: item.title,
+            filename: item.title,
+          }));
+        }
 
         return formatSuccess({
           count: formattedFiles.length,

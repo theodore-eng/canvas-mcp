@@ -743,6 +743,18 @@ export interface ActivityStreamSummary {
   count: number;
 }
 
+// ==================== TABS ====================
+
+export interface Tab {
+  id: string;
+  label: string;
+  type: string;
+  position: number;
+  hidden?: boolean;
+  visibility?: string;
+  url?: string;
+}
+
 // ==================== USER PREFERENCES (LEARNING SYSTEM) ====================
 
 export interface UserPreferences {

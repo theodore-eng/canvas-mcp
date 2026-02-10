@@ -1,6 +1,6 @@
 {
   "name": "canvas-mcp",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "MCP server that connects Claude to Canvas LMS - manage coursework through natural conversation",
   "main": "dist/index.js",
   "type": "module",

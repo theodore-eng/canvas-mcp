@@ -33,7 +33,7 @@ import { registerPrompts } from './prompts.js';
 import { registerResources } from './resources.js';
 import { getCanvasClient } from './canvas-client.js';
 
-const SERVER_VERSION = '2.2.0';
+const SERVER_VERSION = '2.3.0';
 
 // Validate required environment variables
 function validateEnvironment(): void {
@@ -125,9 +125,10 @@ async function main(): Promise<void> {
   console.error(`Connected to: ${process.env.CANVAS_BASE_URL}`);
   console.error('');
   console.error('Active features:');
-  console.error('  Tools:     courses, syllabus, assignments, modules, search, grades, grade-analysis,');
-  console.error('             todos, pages, calendar, files, planner, dashboard, feedback,');
-  console.error('             conversations, folders, activity, preferences');
+  console.error('  Tools:     courses, syllabus, find-syllabus, course-tools, assignments, modules,');
+  console.error('             search, grades, grade-analysis, todos, pages, calendar, files,');
+  console.error('             planner, dashboard, feedback, conversations, folders, activity, preferences');
+  console.error('  Fallbacks: pages→modules, files→modules, syllabus→modules, search→modules');
   console.error('  Prompts:   weekly_review, study_plan, assignment_helper, quick_check,');
   console.error('             grade_analysis, catch_up, end_of_semester, submission_review,');
   console.error('             inbox_review, whats_new');
