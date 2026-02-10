@@ -138,7 +138,7 @@ export function registerModuleTools(server: McpServer) {
             new Error(`Module item with ID ${item_id} not found in module ${module_id}`));
         }
 
-        let contentResult: Record<string, unknown> = {
+        const contentResult: Record<string, unknown> = {
           item_title: item.title,
           item_type: item.type,
         };

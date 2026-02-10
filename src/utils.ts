@@ -22,7 +22,7 @@ export async function parsePdf(buffer: Buffer): Promise<{ text: string; numpages
     ]);
     return result;
   } catch (error) {
-    throw new Error(`PDF parsing failed: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`PDF parsing failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
 }
 
@@ -41,7 +41,7 @@ export async function parseOfficeDocument(buffer: Buffer): Promise<string> {
     ]);
     return String(result);
   } catch (error) {
-    throw new Error(`Office document parsing failed: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`Office document parsing failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
 }
 

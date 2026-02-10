@@ -57,78 +57,6 @@ export function registerSearchTools(server: McpServer) {
   );
 
   server.tool(
-    'get_upcoming_assignments',
-    'Get assignments due soon in a specific course (default: next 7 days)',
-    {
-      course_id: z.number().int().positive().describe('The Canvas course ID'),
-      days_ahead: z.number().optional().default(7)
-        .describe('Number of days to look ahead (default: 7)'),
-    },
-    async ({ course_id, days_ahead }) => {
-      try {
-        const assignments = await client.getUpcomingAssignments(course_id, days_ahead);
-
-        const formattedAssignments = assignments.map(a => ({
-          id: a.id,
-          name: a.name,
-          due_at: a.due_at,
-          points_possible: a.points_possible,
-          submission_types: a.submission_types,
-          has_submitted: a.submission?.workflow_state === 'submitted' || a.submission?.workflow_state === 'graded',
-          days_until_due: a.due_at ? Math.ceil((new Date(a.due_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24)) : null,
-          html_url: a.html_url,
-        }));
-
-        formattedAssignments.sort((a, b) => {
-          if (!a.due_at) return 1;
-          if (!b.due_at) return -1;
-          return new Date(a.due_at).getTime() - new Date(b.due_at).getTime();
-        });
-
-        return formatSuccess({
-          looking_ahead_days: days_ahead,
-          count: formattedAssignments.length,
-          assignments: formattedAssignments,
-        });
-      } catch (error) {
-        return formatError('getting upcoming assignments', error);
-      }
-    }
-  );
-
-  server.tool(
-    'get_overdue_assignments',
-    'Get assignments that are past due and not yet submitted in a course',
-    {
-      course_id: z.number().int().positive().describe('The Canvas course ID'),
-    },
-    async ({ course_id }) => {
-      try {
-        const assignments = await client.getOverdueAssignments(course_id);
-
-        const formattedAssignments = assignments.map(a => ({
-          id: a.id,
-          name: a.name,
-          due_at: a.due_at,
-          points_possible: a.points_possible,
-          submission_types: a.submission_types,
-          days_overdue: a.due_at ? Math.floor((Date.now() - new Date(a.due_at).getTime()) / (1000 * 60 * 60 * 24)) : null,
-          html_url: a.html_url,
-        }));
-
-        formattedAssignments.sort((a, b) => (b.days_overdue || 0) - (a.days_overdue || 0));
-
-        return formatSuccess({
-          count: formattedAssignments.length,
-          assignments: formattedAssignments,
-        });
-      } catch (error) {
-        return formatError('getting overdue assignments', error);
-      }
-    }
-  );
-
-  server.tool(
     'search_course_content',
     'Search through a course\'s modules, assignments, pages, files, and discussions by keyword. Searches across all content types for comprehensive results.',
     {
@@ -312,36 +240,74 @@ export function registerSearchTools(server: McpServer) {
 
   server.tool(
     'get_all_upcoming_work',
-    'Get all upcoming work across ALL your courses — assignments, quizzes, discussions, and more. The best single view of everything due soon.',
+    'Get all upcoming (and optionally overdue) work across all courses or a specific course — assignments, quizzes, discussions, and more. The best single view of everything due soon. Replaces get_upcoming_assignments and get_overdue_assignments.',
     {
       days_ahead: z.number().optional().default(7)
         .describe('Number of days to look ahead (default: 7)'),
+      course_id: z.number().int().positive().optional()
+        .describe('Filter to a specific course (omit for all courses)'),
+      include_overdue: z.boolean().optional().default(false)
+        .describe('Also include overdue/missing items (default: false)'),
     },
-    async ({ days_ahead }) => {
+    async ({ days_ahead, course_id, include_overdue }) => {
       try {
         const todayStr = client.getLocalDateString();
         const futureDate = new Date(Date.now() + days_ahead * 24 * 60 * 60 * 1000);
         const futureDateStr = client.getLocalDateString(futureDate);
 
-        const plannerItems = await client.listPlannerItems({
+        // Fetch upcoming items
+        const plannerParams: Record<string, unknown> = {
           start_date: todayStr,
           end_date: futureDateStr,
           filter: 'incomplete_items',
-        });
+        };
+        if (course_id) {
+          plannerParams.context_codes = [`course_${course_id}`];
+        }
 
-        const upcomingWork = sortByDueDate(plannerItems.map(item => formatPlannerItem(item)));
+        const plannerItems = await client.listPlannerItems(plannerParams as import('../types/canvas.js').ListPlannerItemsParams);
+
+        let allItems = plannerItems.map(item => formatPlannerItem(item));
+
+        // Optionally fetch overdue items
+        if (include_overdue) {
+          const pastDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000); // look back 30 days
+          const pastDateStr = client.getLocalDateString(pastDate);
+          const overdueParams: Record<string, unknown> = {
+            start_date: pastDateStr,
+            end_date: todayStr,
+            filter: 'incomplete_items',
+          };
+          if (course_id) {
+            overdueParams.context_codes = [`course_${course_id}`];
+          }
+
+          const overdueItems = await client.listPlannerItems(overdueParams as import('../types/canvas.js').ListPlannerItemsParams);
+          const formattedOverdue = overdueItems
+            .map(item => formatPlannerItem(item))
+            .filter(item => item.due_at && new Date(item.due_at).getTime() < Date.now() && !item.submitted);
+
+          // Mark overdue items
+          const overdueWithFlag = formattedOverdue.map(item => ({ ...item, overdue: true }));
+          const upcomingWithFlag = allItems.map(item => ({ ...item, overdue: false }));
+          allItems = [...overdueWithFlag, ...upcomingWithFlag];
+        }
+
+        const sortedItems = sortByDueDate(allItems);
 
         // Group by course for summary
         const byCourse: Record<string, number> = {};
-        for (const item of upcomingWork) {
+        for (const item of sortedItems) {
           byCourse[item.course] = (byCourse[item.course] || 0) + 1;
         }
 
         return formatSuccess({
           looking_ahead_days: days_ahead,
-          total_count: upcomingWork.length,
+          ...(course_id ? { course_id } : {}),
+          include_overdue,
+          total_count: sortedItems.length,
           by_course: byCourse,
-          items: upcomingWork,
+          items: sortedItems,
         });
       } catch (error) {
         return formatError('getting upcoming work', error);
