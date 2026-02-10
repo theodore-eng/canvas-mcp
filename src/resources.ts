@@ -9,6 +9,9 @@ import { stripHtmlTags } from './utils.js';
  * Resources expose Canvas data as readable context that Claude can reference
  * without making tool calls. This is useful for providing background info
  * that informs Claude's responses.
+ *
+ * All resource handlers include error handling to return meaningful
+ * error content rather than crashing.
  */
 export function registerResources(server: McpServer) {
   const client = getCanvasClient();
@@ -22,31 +25,44 @@ export function registerResources(server: McpServer) {
       mimeType: 'application/json',
     },
     async (uri) => {
-      const courses = await client.listCourses({
-        enrollment_state: 'active',
-        state: ['available'],
-        include: ['total_scores', 'term'],
-      });
+      try {
+        const courses = await client.listCourses({
+          enrollment_state: 'active',
+          state: ['available'],
+          include: ['total_scores', 'term'],
+        });
 
-      const grades = courses
-        .filter(c => c.enrollments && c.enrollments.length > 0)
-        .map(c => ({
-          course: c.name,
-          code: c.course_code,
-          term: c.term?.name,
-          current_score: c.enrollments?.[0]?.computed_current_score ?? null,
-          current_grade: c.enrollments?.[0]?.computed_current_grade ?? null,
-          final_score: c.enrollments?.[0]?.computed_final_score ?? null,
-          final_grade: c.enrollments?.[0]?.computed_final_grade ?? null,
-        }));
+        const grades = courses
+          .filter(c => c.enrollments && c.enrollments.length > 0)
+          .map(c => ({
+            course: c.name,
+            code: c.course_code,
+            term: c.term?.name,
+            current_score: c.enrollments?.[0]?.computed_current_score ?? null,
+            current_grade: c.enrollments?.[0]?.computed_current_grade ?? null,
+            final_score: c.enrollments?.[0]?.computed_final_score ?? null,
+            final_grade: c.enrollments?.[0]?.computed_final_grade ?? null,
+          }));
 
-      return {
-        contents: [{
-          uri: uri.href,
-          mimeType: 'application/json',
-          text: JSON.stringify({ grades, fetched_at: new Date().toISOString() }, null, 2),
-        }],
-      };
+        return {
+          contents: [{
+            uri: uri.href,
+            mimeType: 'application/json',
+            text: JSON.stringify({ grades, fetched_at: new Date().toISOString() }, null, 2),
+          }],
+        };
+      } catch (error) {
+        return {
+          contents: [{
+            uri: uri.href,
+            mimeType: 'application/json',
+            text: JSON.stringify({
+              error: `Failed to load grades: ${error instanceof Error ? error.message : String(error)}`,
+              fetched_at: new Date().toISOString(),
+            }),
+          }],
+        };
+      }
     }
   );
 
@@ -59,27 +75,40 @@ export function registerResources(server: McpServer) {
       mimeType: 'application/json',
     },
     async (uri) => {
-      const courses = await client.listCourses({
-        enrollment_state: 'active',
-        state: ['available'],
-        include: ['term', 'total_students'],
-      });
+      try {
+        const courses = await client.listCourses({
+          enrollment_state: 'active',
+          state: ['available'],
+          include: ['term', 'total_students'],
+        });
 
-      const courseList = courses.map(c => ({
-        id: c.id,
-        name: c.name,
-        code: c.course_code,
-        term: c.term?.name,
-        total_students: c.total_students,
-      }));
+        const courseList = courses.map(c => ({
+          id: c.id,
+          name: c.name,
+          code: c.course_code,
+          term: c.term?.name,
+          total_students: c.total_students,
+        }));
 
-      return {
-        contents: [{
-          uri: uri.href,
-          mimeType: 'application/json',
-          text: JSON.stringify({ courses: courseList, fetched_at: new Date().toISOString() }, null, 2),
-        }],
-      };
+        return {
+          contents: [{
+            uri: uri.href,
+            mimeType: 'application/json',
+            text: JSON.stringify({ courses: courseList, fetched_at: new Date().toISOString() }, null, 2),
+          }],
+        };
+      } catch (error) {
+        return {
+          contents: [{
+            uri: uri.href,
+            mimeType: 'application/json',
+            text: JSON.stringify({
+              error: `Failed to load courses: ${error instanceof Error ? error.message : String(error)}`,
+              fetched_at: new Date().toISOString(),
+            }),
+          }],
+        };
+      }
     }
   );
 
@@ -88,18 +117,22 @@ export function registerResources(server: McpServer) {
     'course-syllabus',
     new ResourceTemplate('canvas://courses/{courseId}/syllabus', {
       list: async () => {
-        const courses = await client.listCourses({
-          enrollment_state: 'active',
-          state: ['available'],
-        });
-        return {
-          resources: courses.map(c => ({
-            uri: `canvas://courses/${c.id}/syllabus`,
-            name: `${c.name} — Syllabus`,
-            description: `Syllabus for ${c.course_code}`,
-            mimeType: 'text/plain' as const,
-          })),
-        };
+        try {
+          const courses = await client.listCourses({
+            enrollment_state: 'active',
+            state: ['available'],
+          });
+          return {
+            resources: courses.map(c => ({
+              uri: `canvas://courses/${c.id}/syllabus`,
+              name: `${c.name} — Syllabus`,
+              description: `Syllabus for ${c.course_code}`,
+              mimeType: 'text/plain' as const,
+            })),
+          };
+        } catch {
+          return { resources: [] };
+        }
       },
     }),
     {
@@ -107,20 +140,40 @@ export function registerResources(server: McpServer) {
       mimeType: 'text/plain',
     },
     async (uri, variables) => {
-      const courseId = Number(variables.courseId);
-      const course = await client.getCourse(courseId, ['syllabus_body']);
+      try {
+        const courseId = Number(variables.courseId);
+        if (!Number.isFinite(courseId) || courseId <= 0) {
+          return {
+            contents: [{
+              uri: uri.href,
+              mimeType: 'text/plain',
+              text: 'Error: Invalid course ID',
+            }],
+          };
+        }
 
-      const syllabusText = course.syllabus_body
-        ? stripHtmlTags(course.syllabus_body)
-        : '(No syllabus available for this course)';
+        const course = await client.getCourse(courseId, ['syllabus_body']);
 
-      return {
-        contents: [{
-          uri: uri.href,
-          mimeType: 'text/plain',
-          text: `# ${course.name} — Syllabus\n\n${syllabusText}`,
-        }],
-      };
+        const syllabusText = course.syllabus_body
+          ? stripHtmlTags(course.syllabus_body)
+          : '(No syllabus available for this course)';
+
+        return {
+          contents: [{
+            uri: uri.href,
+            mimeType: 'text/plain',
+            text: `# ${course.name} — Syllabus\n\n${syllabusText}`,
+          }],
+        };
+      } catch (error) {
+        return {
+          contents: [{
+            uri: uri.href,
+            mimeType: 'text/plain',
+            text: `Error loading syllabus: ${error instanceof Error ? error.message : String(error)}`,
+          }],
+        };
+      }
     }
   );
 
@@ -129,18 +182,22 @@ export function registerResources(server: McpServer) {
     'course-assignments',
     new ResourceTemplate('canvas://courses/{courseId}/assignments', {
       list: async () => {
-        const courses = await client.listCourses({
-          enrollment_state: 'active',
-          state: ['available'],
-        });
-        return {
-          resources: courses.map(c => ({
-            uri: `canvas://courses/${c.id}/assignments`,
-            name: `${c.name} — Assignments`,
-            description: `All assignments for ${c.course_code}`,
-            mimeType: 'application/json' as const,
-          })),
-        };
+        try {
+          const courses = await client.listCourses({
+            enrollment_state: 'active',
+            state: ['available'],
+          });
+          return {
+            resources: courses.map(c => ({
+              uri: `canvas://courses/${c.id}/assignments`,
+              name: `${c.name} — Assignments`,
+              description: `All assignments for ${c.course_code}`,
+              mimeType: 'application/json' as const,
+            })),
+          };
+        } catch {
+          return { resources: [] };
+        }
       },
     }),
     {
@@ -148,30 +205,53 @@ export function registerResources(server: McpServer) {
       mimeType: 'application/json',
     },
     async (uri, variables) => {
-      const courseId = Number(variables.courseId);
-      const assignments = await client.listAssignments(courseId, {
-        include: ['submission'],
-        order_by: 'due_at',
-      });
+      try {
+        const courseId = Number(variables.courseId);
+        if (!Number.isFinite(courseId) || courseId <= 0) {
+          return {
+            contents: [{
+              uri: uri.href,
+              mimeType: 'application/json',
+              text: JSON.stringify({ error: 'Invalid course ID' }),
+            }],
+          };
+        }
 
-      const formatted = assignments.map(a => ({
-        id: a.id,
-        name: a.name,
-        due_at: a.due_at,
-        points_possible: a.points_possible,
-        submission_types: a.submission_types,
-        status: a.submission?.workflow_state ?? 'unsubmitted',
-        grade: a.submission?.grade ?? null,
-        score: a.submission?.score ?? null,
-      }));
+        const assignments = await client.listAssignments(courseId, {
+          include: ['submission'],
+          order_by: 'due_at',
+        });
 
-      return {
-        contents: [{
-          uri: uri.href,
-          mimeType: 'application/json',
-          text: JSON.stringify({ assignments: formatted, fetched_at: new Date().toISOString() }, null, 2),
-        }],
-      };
+        const formatted = assignments.map(a => ({
+          id: a.id,
+          name: a.name,
+          due_at: a.due_at,
+          points_possible: a.points_possible,
+          submission_types: a.submission_types,
+          status: a.submission?.workflow_state ?? 'unsubmitted',
+          grade: a.submission?.grade ?? null,
+          score: a.submission?.score ?? null,
+        }));
+
+        return {
+          contents: [{
+            uri: uri.href,
+            mimeType: 'application/json',
+            text: JSON.stringify({ assignments: formatted, fetched_at: new Date().toISOString() }, null, 2),
+          }],
+        };
+      } catch (error) {
+        return {
+          contents: [{
+            uri: uri.href,
+            mimeType: 'application/json',
+            text: JSON.stringify({
+              error: `Failed to load assignments: ${error instanceof Error ? error.message : String(error)}`,
+              fetched_at: new Date().toISOString(),
+            }),
+          }],
+        };
+      }
     }
   );
 }

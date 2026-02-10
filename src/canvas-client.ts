@@ -28,7 +28,6 @@ import type {
   CreatePlannerNoteParams,
   CreatePlannerOverrideParams,
   SubmitAssignmentParams,
-  SubmissionType,
 } from './types/canvas.js';
 
 interface CanvasClientConfig {
@@ -39,10 +38,58 @@ interface CanvasClientConfig {
 export class CanvasClient {
   private baseUrl: string;
   private apiToken: string;
+  private baseOrigin: string;
+
+  /** Default request timeout in milliseconds (30 seconds) */
+  private static readonly REQUEST_TIMEOUT_MS = 30_000;
+  /** Maximum number of pages to fetch in paginated requests */
+  private static readonly MAX_PAGES = 100;
+  /** Maximum total items to collect across all pages */
+  private static readonly MAX_PAGINATED_ITEMS = 10_000;
 
   constructor(config: CanvasClientConfig) {
     this.baseUrl = config.baseUrl.replace(/\/$/, '');
     this.apiToken = config.apiToken;
+    // Extract origin for URL validation
+    try {
+      this.baseOrigin = new URL(this.baseUrl).origin;
+    } catch {
+      this.baseOrigin = this.baseUrl;
+    }
+  }
+
+  /**
+   * Validate that a URL belongs to the configured Canvas instance.
+   * Prevents SSRF by ensuring we only follow URLs to the same origin.
+   */
+  private isAllowedUrl(url: string): boolean {
+    try {
+      return new URL(url).origin === this.baseOrigin;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Create an AbortSignal with timeout for fetch requests.
+   */
+  private createTimeoutSignal(timeoutMs: number = CanvasClient.REQUEST_TIMEOUT_MS): AbortSignal {
+    return AbortSignal.timeout(timeoutMs);
+  }
+
+  /**
+   * Sanitize error messages to avoid leaking sensitive info (tokens, internal URLs).
+   */
+  private sanitizeErrorMessage(status: number, statusText: string, body: string): string {
+    // Remove any auth tokens that might appear in error body
+    const sanitized = body
+      .replace(/Bearer\s+[^\s"']+/gi, 'Bearer [REDACTED]')
+      .replace(/access_token=[^\s&"']+/gi, 'access_token=[REDACTED]');
+    // Truncate very long error bodies
+    const truncated = sanitized.length > 500
+      ? sanitized.substring(0, 500) + '... (truncated)'
+      : sanitized;
+    return `Canvas API error: ${status} ${statusText} - ${truncated}`;
   }
 
   private async request<T>(
@@ -53,9 +100,14 @@ export class CanvasClient {
       ? endpoint
       : `${this.baseUrl}/api/v1${endpoint}`;
 
+    // Validate URL origin for absolute URLs
+    if (endpoint.startsWith('http') && !this.isAllowedUrl(url)) {
+      throw new Error('Request blocked: URL does not match configured Canvas instance');
+    }
+
     const headers: HeadersInit = {
       'Authorization': `Bearer ${this.apiToken}`,
-      ...(options.method === 'POST' || options.method === 'PUT'
+      ...(options.method === 'POST' || options.method === 'PUT' || options.method === 'DELETE'
         ? { 'Content-Type': 'application/json' }
         : {}),
       ...options.headers,
@@ -64,19 +116,21 @@ export class CanvasClient {
     const response = await fetch(url, {
       ...options,
       headers,
+      signal: options.signal ?? this.createTimeoutSignal(),
     });
 
     if (!response.ok) {
       const errorBody = await response.text();
-      throw new Error(
-        `Canvas API error: ${response.status} ${response.statusText} - ${errorBody}`
-      );
+      throw new Error(this.sanitizeErrorMessage(response.status, response.statusText, errorBody));
     }
 
     return response.json() as Promise<T>;
   }
 
-  // Paginated request that follows Link headers and collects all pages
+  /**
+   * Paginated request that follows Link headers and collects all pages.
+   * Includes safety guards: max pages, max items, origin validation, and timeouts.
+   */
   private async requestPaginated<T>(
     endpoint: string,
     options: RequestInit = {}
@@ -91,23 +145,45 @@ export class CanvasClient {
       url += url.includes('?') ? '&per_page=100' : '?per_page=100';
     }
 
+    let pageCount = 0;
+
     while (url) {
+      // Guard: max pages
+      if (++pageCount > CanvasClient.MAX_PAGES) {
+        console.error(`Pagination limit reached (${CanvasClient.MAX_PAGES} pages). Returning partial results.`);
+        break;
+      }
+
+      // Guard: validate URL origin for followed links
+      if (url.startsWith('http') && !this.isAllowedUrl(url)) {
+        console.error('Pagination stopped: next page URL does not match Canvas instance origin.');
+        break;
+      }
+
       const headers: HeadersInit = {
         'Authorization': `Bearer ${this.apiToken}`,
         ...options.headers,
       };
 
-      const response = await fetch(url, { ...options, headers });
+      const response = await fetch(url, {
+        ...options,
+        headers,
+        signal: options.signal ?? this.createTimeoutSignal(),
+      });
 
       if (!response.ok) {
         const errorBody = await response.text();
-        throw new Error(
-          `Canvas API error: ${response.status} ${response.statusText} - ${errorBody}`
-        );
+        throw new Error(this.sanitizeErrorMessage(response.status, response.statusText, errorBody));
       }
 
       const data = await response.json() as T[];
       results.push(...data);
+
+      // Guard: max items
+      if (results.length >= CanvasClient.MAX_PAGINATED_ITEMS) {
+        console.error(`Item limit reached (${CanvasClient.MAX_PAGINATED_ITEMS} items). Returning partial results.`);
+        break;
+      }
 
       // Parse Link header for next page
       url = this.getNextPageUrl(response.headers.get('Link'));
@@ -302,7 +378,11 @@ export class CanvasClient {
   async downloadFile(downloadUrl: string): Promise<ArrayBuffer> {
     // Canvas file URLs redirect to pre-signed S3 URLs.
     // We must NOT send the Bearer token on the redirect.
-    const response = await fetch(downloadUrl, { redirect: 'follow' });
+    // Note: S3 URLs have a different origin, so we don't validate origin here.
+    const response = await fetch(downloadUrl, {
+      redirect: 'follow',
+      signal: this.createTimeoutSignal(60_000), // 60s timeout for file downloads
+    });
 
     if (!response.ok) {
       throw new Error(`File download error: ${response.status} ${response.statusText}`);

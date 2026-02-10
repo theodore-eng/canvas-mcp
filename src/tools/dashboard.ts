@@ -20,8 +20,8 @@ export function registerDashboardTools(server: McpServer) {
         const futureDate = new Date(Date.now() + days_ahead * 24 * 60 * 60 * 1000);
         const futureDateStr = futureDate.toISOString().split('T')[0];
 
-        // Fetch all data in parallel for speed
-        const [courses, todos, plannerItems] = await Promise.all([
+        // Fetch all data in parallel for speed — use allSettled so partial failures don't kill the briefing
+        const [coursesResult, todosResult, plannerResult] = await Promise.allSettled([
           client.listCourses({
             enrollment_state: 'active',
             state: ['available'],
@@ -35,24 +35,42 @@ export function registerDashboardTools(server: McpServer) {
           }),
         ]);
 
+        const courses = coursesResult.status === 'fulfilled' ? coursesResult.value : [];
+        const todos = todosResult.status === 'fulfilled' ? todosResult.value : [];
+        const plannerItems = plannerResult.status === 'fulfilled' ? plannerResult.value : [];
+
+        const warnings: string[] = [];
+        if (coursesResult.status === 'rejected') warnings.push('Could not load courses');
+        if (todosResult.status === 'rejected') warnings.push('Could not load todo items');
+        if (plannerResult.status === 'rejected') warnings.push('Could not load planner items');
+
         // Fetch calendar events and announcements (need course IDs first)
         const contextCodes = courses.map(c => `course_${c.id}`);
         const tomorrowStr = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().split('T')[0];
         const weekAgoStr = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
-        const [todayEvents, announcements] = await Promise.all([
-          client.listCalendarEvents({
-            context_codes: contextCodes,
-            start_date: todayStr,
-            end_date: tomorrowStr,
-          }),
-          client.listAnnouncements({
-            context_codes: contextCodes,
-            start_date: weekAgoStr,
-            end_date: todayStr,
-            active_only: true,
-          }).catch(() => []), // Don't fail the whole briefing if announcements error
+        const [eventsResult, announcementsResult] = await Promise.allSettled([
+          contextCodes.length > 0
+            ? client.listCalendarEvents({
+                context_codes: contextCodes,
+                start_date: todayStr,
+                end_date: tomorrowStr,
+              })
+            : Promise.resolve([]),
+          contextCodes.length > 0
+            ? client.listAnnouncements({
+                context_codes: contextCodes,
+                start_date: weekAgoStr,
+                end_date: todayStr,
+                active_only: true,
+              })
+            : Promise.resolve([]),
         ]);
+
+        const todayEvents = eventsResult.status === 'fulfilled' ? eventsResult.value : [];
+        const announcements = announcementsResult.status === 'fulfilled' ? announcementsResult.value : [];
+        if (eventsResult.status === 'rejected') warnings.push('Could not load calendar events');
+        if (announcementsResult.status === 'rejected') warnings.push('Could not load announcements');
 
         // Build grade summary
         const gradesSummary = courses
@@ -139,6 +157,7 @@ export function registerDashboardTools(server: McpServer) {
 
         return formatSuccess({
           date: todayStr,
+          ...(warnings.length > 0 ? { warnings } : {}),
           summary: {
             courses_active: courses.length,
             due_today: dueTodayCount,
