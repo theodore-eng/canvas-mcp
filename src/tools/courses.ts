@@ -8,7 +8,7 @@ export function registerCourseTools(server: McpServer) {
 
   server.tool(
     'list_courses',
-    'List all your enrolled Canvas courses with term info and student count',
+    'List your current Canvas courses. By default only shows courses whose term has not ended. Set include_past=true to see old courses.',
     {
       enrollment_type: z.enum(['teacher', 'student', 'ta', 'observer', 'designer']).optional()
         .describe('Filter by enrollment type'),
@@ -16,8 +16,10 @@ export function registerCourseTools(server: McpServer) {
         .describe('Filter by enrollment state'),
       include_syllabus: z.boolean().optional().default(false)
         .describe('Include syllabus body in response'),
+      include_past: z.boolean().optional().default(false)
+        .describe('Include courses from past terms (default: only current/future courses)'),
     },
-    async ({ enrollment_type, enrollment_state, include_syllabus }) => {
+    async ({ enrollment_type, enrollment_state, include_syllabus, include_past }) => {
       try {
         const include: string[] = ['term', 'total_students'];
         if (include_syllabus) {
@@ -31,7 +33,18 @@ export function registerCourseTools(server: McpServer) {
           state: ['available'],
         });
 
-        const formattedCourses = courses.map(course => ({
+        // Filter out past courses unless explicitly requested
+        const now = new Date();
+        const filtered = include_past
+          ? courses
+          : courses.filter(course => {
+              // Keep if term has no end date or end date is in the future
+              const endDate = course.term?.end_at ?? course.end_at;
+              if (!endDate) return true;
+              return new Date(endDate) > now;
+            });
+
+        const formattedCourses = filtered.map(course => ({
           id: course.id,
           name: course.name,
           course_code: course.course_code,
