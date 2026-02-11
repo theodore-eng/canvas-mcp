@@ -31,14 +31,22 @@ export function registerAssignmentTools(server: McpServer) {
           include: include as ('submission')[],
         });
 
+        const submissionTypeLabels: Record<string, string> = {
+          online_upload: 'File Upload',
+          online_text_entry: 'Text Entry',
+          online_quiz: 'Quiz',
+          online_url: 'URL',
+          media_recording: 'Media Recording',
+          external_tool: 'External Tool',
+        };
+
         const formattedAssignments = assignments.map(a => ({
           id: a.id,
           name: a.name,
           due_at: a.due_at,
           points_possible: a.points_possible,
-          submission_types: a.submission_types,
-          published: a.published,
-          locked_for_user: a.locked_for_user,
+          submission_types: a.submission_types.map(t => submissionTypeLabels[t] ?? t),
+          ...(a.locked_for_user ? { locked_for_user: true, lock_explanation: a.lock_explanation } : {}),
           has_submitted: a.submission?.workflow_state === 'submitted' || a.submission?.workflow_state === 'graded',
           submission_status: a.submission?.workflow_state,
           grade: a.submission?.grade,
@@ -55,7 +63,7 @@ export function registerAssignmentTools(server: McpServer) {
 
   server.tool(
     'get_assignment',
-    'Get full details about a specific assignment including description, rubric, and your submission status',
+    'Get full details about a specific assignment including description, rubric criteria and ratings, and your submission status. Includes rubric by default.',
     {
       course_id: z.number().int().positive().describe('The Canvas course ID'),
       assignment_id: z.number().int().positive().describe('The assignment ID'),
@@ -81,7 +89,7 @@ export function registerAssignmentTools(server: McpServer) {
           grading_type: assignment.grading_type,
           submission_types: assignment.submission_types,
           allowed_extensions: assignment.allowed_extensions,
-          allowed_attempts: assignment.allowed_attempts,
+          allowed_attempts: assignment.allowed_attempts === -1 ? 'unlimited' : assignment.allowed_attempts,
           published: assignment.published,
           locked_for_user: assignment.locked_for_user,
           lock_explanation: assignment.lock_explanation,
@@ -123,42 +131,4 @@ export function registerAssignmentTools(server: McpServer) {
     }
   );
 
-  server.tool(
-    'get_rubric',
-    'Get the grading rubric for an assignment — shows criteria, point values, and rating descriptions',
-    {
-      course_id: z.number().int().positive().describe('The Canvas course ID'),
-      assignment_id: z.number().int().positive().describe('The assignment ID to get rubric for'),
-    },
-    async ({ course_id, assignment_id }) => {
-      try {
-        const assignment = await client.getAssignment(course_id, assignment_id);
-
-        if (!assignment.rubric) {
-          return formatSuccess({
-            message: 'This assignment does not have a rubric.',
-          });
-        }
-
-        return formatSuccess({
-          settings: assignment.rubric_settings,
-          use_for_grading: assignment.use_rubric_for_grading,
-          total_points: assignment.rubric_settings?.points_possible,
-          criteria: assignment.rubric.map(criterion => ({
-            id: criterion.id,
-            description: criterion.description,
-            long_description: criterion.long_description,
-            points: criterion.points,
-            ratings: criterion.ratings.map(rating => ({
-              description: rating.description,
-              long_description: rating.long_description,
-              points: rating.points,
-            })),
-          })),
-        });
-      } catch (error) {
-        return formatError('getting rubric', error);
-      }
-    }
-  );
 }

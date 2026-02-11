@@ -8,7 +8,7 @@ export function registerActivityTools(server: McpServer) {
 
   server.tool(
     'get_activity_stream',
-    'Get recent activity across all your courses — announcements, discussions, submissions, messages, and more. Shows what has been happening lately. Supports filtering by activity type and course.',
+    'Get recent activity across all your courses — announcements, discussions, submissions, messages, and more. Use this for a chronological feed of recent activity. For a structured daily overview, use daily_briefing.',
     {
       limit: z.number().optional().default(20)
         .describe('Maximum number of items to return (default: 20, max: 50)'),

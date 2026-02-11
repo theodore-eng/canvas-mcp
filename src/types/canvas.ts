@@ -398,18 +398,6 @@ export interface DiscussionEntry {
   has_more_replies?: boolean;
 }
 
-// API Request/Response types
-export interface PaginatedResponse<T> {
-  data: T[];
-  link?: {
-    current?: string;
-    next?: string;
-    prev?: string;
-    first?: string;
-    last?: string;
-  };
-}
-
 export interface FileUploadParams {
   name: string;
   size: number;
@@ -756,24 +744,3 @@ export interface Tab {
   url?: string;
 }
 
-// ==================== USER PREFERENCES (LEARNING SYSTEM) ====================
-
-export interface UserPreferences {
-  display: Record<string, unknown>;
-  priorities: Record<string, unknown>;
-  behavior: Record<string, unknown>;
-  courses: Record<string, Record<string, unknown>>;
-  last_updated?: string;
-}
-
-export interface ContextNote {
-  timestamp: string;
-  note: string;
-  source: 'observation' | 'user_statement' | 'implicit';
-}
-
-export interface ContextData {
-  workflow_patterns: ContextNote[];
-  conversation_notes: ContextNote[];
-  preferences_applied: ContextNote[];
-}

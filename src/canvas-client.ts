@@ -38,6 +38,7 @@ import type {
   ActivityStreamSummary,
   Tab,
 } from './types/canvas.js';
+import { stripHtmlTags, stableStringify } from './utils.js';
 
 interface CanvasClientConfig {
   baseUrl: string;
@@ -52,9 +53,11 @@ export class CanvasClient {
   /** Cached user timezone from profile */
   private userTimezone: string | null = null;
 
-  /** In-memory cache with TTL */
+  /** In-memory cache with TTL and LRU eviction */
   private cache = new Map<string, { data: unknown; expiresAt: number }>();
 
+  /** Maximum cache entries before LRU eviction */
+  private static readonly MAX_CACHE_ENTRIES = 500;
   /** Default cache TTL: 5 minutes */
   private static readonly CACHE_TTL_MS = 300_000;
   /** Default request timeout in milliseconds (30 seconds) */
@@ -84,6 +87,27 @@ export class CanvasClient {
   private isAllowedUrl(url: string): boolean {
     try {
       return new URL(url).origin === this.baseOrigin;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Validate that a URL belongs to Canvas or known S3/CDN upload/download domains.
+   * Prevents SSRF by blocking requests to arbitrary hosts.
+   */
+  private isAllowedFileUrl(url: string): boolean {
+    try {
+      const hostname = new URL(url).hostname;
+      // Allow Canvas origin
+      if (hostname === new URL(this.baseUrl).hostname) return true;
+      // Allow known S3 patterns used by Canvas/Instructure
+      if (hostname === 'instructure-uploads.s3.amazonaws.com') return true;
+      if (/^[\w.-]+\.s3\.amazonaws\.com$/.test(hostname)) return true;
+      if (/^[\w.-]+\.s3\.[\w-]+\.amazonaws\.com$/.test(hostname)) return true;
+      // Allow Instructure CDN domains
+      if (hostname.endsWith('.instructure.com')) return true;
+      return false;
     } catch {
       return false;
     }
@@ -120,11 +144,34 @@ export class CanvasClient {
       this.cache.delete(key);
       return null;
     }
+    // Move to end for LRU ordering (most recently accessed = last)
+    this.cache.delete(key);
+    this.cache.set(key, entry);
     return entry.data as T;
   }
 
   private setCached(key: string, data: unknown, ttlMs: number = CanvasClient.CACHE_TTL_MS): void {
+    // Evict expired entries if approaching capacity
+    if (this.cache.size >= CanvasClient.MAX_CACHE_ENTRIES) {
+      this.sweepExpired();
+    }
+    // If still at capacity after sweep, evict oldest (first in Map)
+    while (this.cache.size >= CanvasClient.MAX_CACHE_ENTRIES) {
+      const oldest = this.cache.keys().next().value;
+      if (oldest !== undefined) this.cache.delete(oldest);
+      else break;
+    }
     this.cache.set(key, { data, expiresAt: Date.now() + ttlMs });
+  }
+
+  /** Remove all expired entries from cache */
+  private sweepExpired(): void {
+    const now = Date.now();
+    for (const [key, entry] of this.cache) {
+      if (now > entry.expiresAt) {
+        this.cache.delete(key);
+      }
+    }
   }
 
   /** Clear all cached data */
@@ -311,7 +358,7 @@ export class CanvasClient {
   // ==================== COURSES ====================
 
   async listCourses(params: ListCoursesParams = {}): Promise<Course[]> {
-    const cacheKey = `courses:${JSON.stringify(params)}`;
+    const cacheKey = `courses:${stableStringify(params)}`;
     const cached = this.getCached<Course[]>(cacheKey);
     if (cached) return cached;
 
@@ -319,6 +366,25 @@ export class CanvasClient {
     const courses = await this.requestPaginated<Course>(`/courses${query}`);
     this.setCached(cacheKey, courses);
     return courses;
+  }
+
+  /**
+   * Get all active, available courses. Convenience wrapper for the common pattern.
+   */
+  async getActiveCourses(include?: string[]): Promise<Course[]> {
+    return this.listCourses({
+      enrollment_state: 'active',
+      state: ['available'],
+      ...(include ? { include: include as ('term' | 'total_students' | 'syllabus_body')[] } : {}),
+    });
+  }
+
+  /**
+   * Get context_codes for all active courses (e.g., ["course_123", "course_456"]).
+   */
+  async getActiveCourseContextCodes(): Promise<string[]> {
+    const courses = await this.getActiveCourses();
+    return courses.map(c => `course_${c.id}`);
   }
 
   async getCourse(courseId: number, include?: string[]): Promise<Course> {
@@ -342,8 +408,6 @@ export class CanvasClient {
       return null;
     }
 
-    // Import stripHtmlTags dynamically to avoid circular deps
-    const { stripHtmlTags } = await import('./utils.js');
     const result = { text: stripHtmlTags(course.syllabus_body), course_name: course.name };
     this.setCached(cacheKey, { value: result }, 600_000); // 10 min TTL
     return result;
@@ -367,10 +431,16 @@ export class CanvasClient {
     courseId: number,
     params: ListAssignmentGroupsParams = {}
   ): Promise<AssignmentGroup[]> {
+    const cacheKey = `assignmentGroups:${courseId}:${stableStringify(params)}`;
+    const cached = this.getCached<AssignmentGroup[]>(cacheKey);
+    if (cached) return cached;
+
     const query = this.buildQueryString(params);
-    return this.requestPaginated<AssignmentGroup>(
+    const groups = await this.requestPaginated<AssignmentGroup>(
       `/courses/${courseId}/assignment_groups${query}`
     );
+    this.setCached(cacheKey, groups, 180_000); // 3 min TTL
+    return groups;
   }
 
   // ==================== ASSIGNMENTS ====================
@@ -379,10 +449,16 @@ export class CanvasClient {
     courseId: number,
     params: ListAssignmentsParams = {}
   ): Promise<Assignment[]> {
+    const cacheKey = `assignments:${courseId}:${stableStringify(params)}`;
+    const cached = this.getCached<Assignment[]>(cacheKey);
+    if (cached) return cached;
+
     const query = this.buildQueryString(params);
-    return this.requestPaginated<Assignment>(
+    const assignments = await this.requestPaginated<Assignment>(
       `/courses/${courseId}/assignments${query}`
     );
+    this.setCached(cacheKey, assignments, 180_000); // 3 min TTL
+    return assignments;
   }
 
   async getAssignment(
@@ -489,9 +565,14 @@ export class CanvasClient {
     const blob = new Blob([arrayBuffer], { type: contentType });
     formData.append('file', blob, fileName);
 
+    if (!this.isAllowedFileUrl(uploadUrl)) {
+      throw new Error(`Upload URL rejected: hostname not in allowlist`);
+    }
+
     const response = await fetch(uploadUrl, {
       method: 'POST',
       body: formData,
+      signal: this.createTimeoutSignal(60_000),
     });
 
     if (!response.ok) {
@@ -519,7 +600,10 @@ export class CanvasClient {
   async downloadFile(downloadUrl: string): Promise<ArrayBuffer> {
     // Canvas file URLs redirect to pre-signed S3 URLs.
     // We must NOT send the Bearer token on the redirect.
-    // Note: S3 URLs have a different origin, so we don't validate origin here.
+    if (!this.isAllowedFileUrl(downloadUrl)) {
+      throw new Error(`Download URL rejected: hostname not in allowlist`);
+    }
+
     const response = await fetch(downloadUrl, {
       redirect: 'follow',
       signal: this.createTimeoutSignal(60_000), // 60s timeout for file downloads
@@ -543,7 +627,7 @@ export class CanvasClient {
   }
 
   async getPage(courseId: number, pageUrlOrId: string): Promise<Page> {
-    return this.request<Page>(`/courses/${courseId}/pages/${pageUrlOrId}`);
+    return this.request<Page>(`/courses/${courseId}/pages/${encodeURIComponent(pageUrlOrId)}`);
   }
 
   // ==================== MODULES ====================
@@ -552,8 +636,14 @@ export class CanvasClient {
     courseId: number,
     params: ListModulesParams = {}
   ): Promise<Module[]> {
+    const cacheKey = `modules:${courseId}:${stableStringify(params)}`;
+    const cached = this.getCached<Module[]>(cacheKey);
+    if (cached) return cached;
+
     const query = this.buildQueryString(params);
-    return this.requestPaginated<Module>(`/courses/${courseId}/modules${query}`);
+    const modules = await this.requestPaginated<Module>(`/courses/${courseId}/modules${query}`);
+    this.setCached(cacheKey, modules, 180_000); // 3 min TTL
+    return modules;
   }
 
   async getModule(
@@ -896,7 +986,7 @@ export class CanvasClient {
               id: item.content_id ?? item.id,
               display_name: item.title,
               filename: item.title,
-            } as unknown as CanvasFile);
+            } as Pick<CanvasFile, 'id' | 'display_name' | 'filename'> as CanvasFile);
           }
         }
       }

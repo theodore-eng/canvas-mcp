@@ -104,10 +104,28 @@ export function formatError(context: string, error: unknown): {
   isError: true;
 } {
   const message = error instanceof Error ? error.message : String(error);
+
+  // Map common Canvas API error codes to actionable messages
+  let hint = '';
+  if (/\b401\b/.test(message)) {
+    hint = ' Hint: Your Canvas API token may have expired.';
+  } else if (/\b403\b/.test(message)) {
+    hint = ' Hint: Access denied. This course may restrict API access — try list_modules to find content through module items instead.';
+  } else if (/\b404\b/.test(message)) {
+    hint = ' Hint: Not found. This item may have been deleted or unpublished by the instructor.';
+  } else if (/\b429\b/.test(message)) {
+    hint = ' Hint: Canvas is rate-limiting requests. Please wait a moment and try again.';
+  } else if (/\b5\d{2}\b/.test(message)) {
+    hint = ' Hint: Canvas server error. This is temporary — try again in a minute.';
+  }
+
+  // Sanitize filesystem paths from error messages
+  const sanitized = (message + hint).replace(/\/Users\/[^\s:]+/g, '<path>');
+
   return {
     content: [{
       type: 'text' as const,
-      text: `Error ${context}: ${message}`,
+      text: `Error ${context}: ${sanitized}`,
     }],
     isError: true,
   };
@@ -122,7 +140,7 @@ export function formatSuccess(data: unknown): {
   return {
     content: [{
       type: 'text' as const,
-      text: JSON.stringify(data, null, 2),
+      text: JSON.stringify(data != null && typeof data === 'object' ? stripNulls(data) : data, null, 2),
     }],
   };
 }
@@ -200,6 +218,7 @@ export function formatPlannerItem(item: {
     course: item.context_name ?? courseNameFallback ?? (item.course_id ? `course_${item.course_id}` : 'Unknown'),
     course_id: item.course_id ?? null,
     due_at: dueDate,
+    due_display: dueDate ? formatDateDisplay(dueDate) : null,
     days_until_due: dueDate
       ? Math.ceil((new Date(dueDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24))
       : null,
@@ -330,6 +349,175 @@ export function extractLinks(html: string): Array<{
   }
 
   return results;
+}
+
+/**
+ * Parse a month name abbreviation (e.g., "Feb", "Feb.", "February") into a 0-indexed month number.
+ */
+export function parseMonthName(monthStr: string): number | null {
+  const months: Record<string, number> = {
+    jan: 0, january: 0,
+    feb: 1, february: 1,
+    mar: 2, march: 2,
+    apr: 3, april: 3,
+    may: 4,
+    jun: 5, june: 5,
+    jul: 6, july: 6,
+    aug: 7, august: 7,
+    sep: 8, september: 8, sept: 8,
+    oct: 9, october: 9,
+    nov: 10, november: 10,
+    dec: 11, december: 11,
+  };
+  const cleaned = monthStr.toLowerCase().replace(/\.$/, '');
+  return months[cleaned] ?? null;
+}
+
+/**
+ * Try to extract a date from a string using various patterns.
+ * Handles: "(Tue, Feb 10)", "Feb 10", "March 3", "2/10", "02/10"
+ */
+export function extractDateFromText(text: string, referenceYear: number): Date | null {
+  // Pattern 1: "(Tue, Feb 10)" or "(Monday, March 3)" — day-of-week + month + day
+  const dowMonthDay = /\((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s+([A-Z][a-z]+\.?\s+\d{1,2})\)/i;
+  const match1 = text.match(dowMonthDay);
+  if (match1) {
+    const parts = match1[1].trim().split(/\s+/);
+    if (parts.length === 2) {
+      const month = parseMonthName(parts[0]);
+      const day = parseInt(parts[1], 10);
+      if (month !== null && !isNaN(day) && day >= 1 && day <= 31) {
+        return new Date(referenceYear, month, day);
+      }
+    }
+  }
+
+  // Pattern 2: "Feb 10" or "March 3" standalone (month name + day)
+  const monthDayPattern = /\b([A-Z][a-z]+\.?)\s+(\d{1,2})\b/;
+  const match2 = text.match(monthDayPattern);
+  if (match2) {
+    const month = parseMonthName(match2[1]);
+    const day = parseInt(match2[2], 10);
+    if (month !== null && !isNaN(day) && day >= 1 && day <= 31) {
+      return new Date(referenceYear, month, day);
+    }
+  }
+
+  // Pattern 3: MM/DD format
+  const mmddPattern = /\b(\d{1,2})\/(\d{1,2})\b/;
+  const match3 = text.match(mmddPattern);
+  if (match3) {
+    const month = parseInt(match3[1], 10) - 1;
+    const day = parseInt(match3[2], 10);
+    if (month >= 0 && month <= 11 && day >= 1 && day <= 31) {
+      return new Date(referenceYear, month, day);
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Sanitize HTML content before submitting to Canvas.
+ * Strips dangerous tags and attributes that could be used for XSS.
+ */
+export function sanitizeHtmlForSubmission(html: string): string {
+  return html
+    // Remove dangerous tags entirely
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<iframe\b[^>]*>[\s\S]*?<\/iframe>/gi, '')
+    .replace(/<object\b[^>]*>[\s\S]*?<\/object>/gi, '')
+    .replace(/<embed\b[^>]*>[\s\S]*?<\/embed>/gi, '')
+    // Remove event handler attributes (onclick, onerror, etc.)
+    .replace(/\s+on\w+\s*=\s*["'][^"']*["']/gi, '')
+    .replace(/\s+on\w+\s*=\s*\S+/gi, '')
+    // Remove javascript: URLs
+    .replace(/href\s*=\s*["']javascript:[^"']*["']/gi, 'href="#"')
+    .replace(/src\s*=\s*["']javascript:[^"']*["']/gi, 'src=""');
+}
+
+/**
+ * Format an ISO date string into a human-friendly display.
+ * Returns "Wed, Feb 15 at 11:59 PM" style strings.
+ */
+export function formatDateDisplay(iso: string): string {
+  try {
+    const date = new Date(iso);
+    if (isNaN(date.getTime())) return iso;
+    return date.toLocaleDateString('en-US', {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true,
+    });
+  } catch {
+    return iso;
+  }
+}
+
+/**
+ * Format a score as "42/50 (84.0%)" for human-readable display.
+ * Returns null if score or points_possible is missing/zero.
+ */
+export function formatScoreDisplay(score: number | null | undefined, pointsPossible: number | null | undefined): string | null {
+  if (score == null || !pointsPossible) return null;
+  const pct = ((score / pointsPossible) * 100).toFixed(1);
+  return `${score}/${pointsPossible} (${pct}%)`;
+}
+
+/**
+ * Sort items by a date field, with configurable order and null handling.
+ */
+export function sortByDate<T>(
+  items: T[],
+  getDate: (item: T) => string | null | undefined,
+  order: 'asc' | 'desc' = 'asc',
+): T[] {
+  return [...items].sort((a, b) => {
+    const da = getDate(a);
+    const db = getDate(b);
+    if (!da && !db) return 0;
+    if (!da) return 1;
+    if (!db) return -1;
+    const diff = new Date(da).getTime() - new Date(db).getTime();
+    return order === 'asc' ? diff : -diff;
+  });
+}
+
+/**
+ * Recursively strip null and undefined values from an object.
+ * Preserves 0, empty strings, and false.
+ */
+export function stripNulls(obj: unknown): unknown {
+  if (obj === null || obj === undefined) return undefined;
+  if (Array.isArray(obj)) {
+    return obj.map(stripNulls).filter(v => v !== undefined);
+  }
+  if (typeof obj === 'object') {
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+      const stripped = stripNulls(value);
+      if (stripped !== undefined) {
+        result[key] = stripped;
+      }
+    }
+    return result;
+  }
+  return obj;
+}
+
+/**
+ * Stable JSON.stringify with sorted keys for deterministic cache keys.
+ */
+export function stableStringify(obj: unknown): string {
+  return JSON.stringify(obj, (_, value) => {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)));
+    }
+    return value;
+  });
 }
 
 /** Maximum file size for text extraction (25 MB) */

@@ -196,14 +196,11 @@ export function registerSearchTools(server: McpServer) {
         let courses;
         if (course_ids && course_ids.length > 0) {
           // Fetch actual course names instead of using placeholders
-          const allCourses = await client.listCourses({ enrollment_state: 'active', state: ['available'] });
+          const allCourses = await client.getActiveCourses();
           const courseMap = new Map(allCourses.map(c => [c.id, c.name]));
           courses = course_ids.map(id => ({ id, name: courseMap.get(id) ?? `Course ${id}` }));
         } else {
-          const allCourses = await client.listCourses({
-            enrollment_state: 'active',
-            state: ['available'],
-          });
+          const allCourses = await client.getActiveCourses();
           courses = allCourses.map(c => ({ id: c.id, name: c.name }));
         }
 
@@ -310,7 +307,7 @@ export function registerSearchTools(server: McpServer) {
 
   server.tool(
     'get_all_upcoming_work',
-    'Get a focused list of upcoming assignments, quizzes, and discussions due soon, sorted by due date. Use this when you specifically need to know what work is coming up, not a full dashboard. Supports filtering by course and including overdue items.',
+    'Get a focused list of upcoming assignments, quizzes, and discussions due soon, sorted by due date. Use this for a quick deadline overview across all courses. Supports filtering by course and including overdue items.',
     {
       days_ahead: z.number().optional().default(7)
         .describe('Number of days to look ahead (default: 7)'),

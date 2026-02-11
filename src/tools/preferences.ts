@@ -29,7 +29,7 @@ export function registerPreferenceTools(server: McpServer) {
         } catch {
           parsedValue = value;
         }
-        const prefs = setPreference(category, key, parsedValue);
+        setPreference(category, key, parsedValue);
         return formatSuccess({
           saved: true,
           category,

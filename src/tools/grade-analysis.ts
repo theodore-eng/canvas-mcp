@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getCanvasClient } from '../canvas-client.js';
-import { formatError, formatSuccess } from '../utils.js';
+import { formatError, formatSuccess, formatScoreDisplay } from '../utils.js';
 import type { AssignmentGroup, Assignment, Submission } from '../types/canvas.js';
 
 // ==================== HELPERS ====================
@@ -12,6 +12,7 @@ interface AssignmentDetail {
   score: number | null;
   points_possible: number;
   percentage: number | null;
+  score_display: string | null;
   graded: boolean;
   due_at: string | null;
   late: boolean;
@@ -57,6 +58,7 @@ function buildAssignmentDetail(a: Assignment): AssignmentDetail {
     score,
     points_possible: a.points_possible,
     percentage,
+    score_display: formatScoreDisplay(score, a.points_possible),
     graded,
     due_at: a.due_at,
     late: sub?.late ?? false,
@@ -171,11 +173,13 @@ function projectGrade(
     const allProjected: AssignmentDetail[] = g.assignments.map(a => {
       if (a.graded) return a;
       if (a.points_possible <= 0) return a;
+      const projectedScore = a.points_possible * assumedPct / 100;
       return {
         ...a,
         graded: true,
-        score: a.points_possible * assumedPct / 100,
+        score: projectedScore,
         percentage: assumedPct,
+        score_display: formatScoreDisplay(projectedScore, a.points_possible),
       };
     });
 
@@ -260,6 +264,7 @@ function buildProjectedGroups(
           score,
           points_possible: a.points_possible,
           percentage: pct,
+          score_display: formatScoreDisplay(score, a.points_possible),
           graded,
           due_at: a.due_at,
           late: sub?.late ?? false,
@@ -313,19 +318,23 @@ export function registerGradeAnalysisTools(server: McpServer) {
 
   server.tool(
     'get_grade_breakdown',
-    'Get a detailed grade breakdown for a course showing assignment group weights, scores per group, individual assignment performance, and the course syllabus. Cross-references Canvas data with the syllabus for accurate grading policies, letter grade cutoffs, late penalties, and drop rules. Essential for understanding where your grade really stands.',
+    'Get a detailed grade breakdown for a course showing assignment group weights, scores per group, individual assignment performance, and grade projections. Analysis summary (strongest/weakest group, projections) appears first. Set include_syllabus=true to cross-reference grading policies.',
     {
       course_id: z.number().int().positive().describe('The Canvas course ID'),
+      include_syllabus: z.boolean().optional().default(false)
+        .describe('Include syllabus text for cross-referencing grading policies (default: false)'),
     },
-    async ({ course_id }) => {
+    async ({ course_id, include_syllabus }) => {
       try {
-        // Fetch course, assignment groups, and syllabus in parallel
+        // Fetch course and assignment groups (syllabus only if requested)
         const [course, assignmentGroups, syllabus] = await Promise.all([
           client.getCourse(course_id, ['total_scores']),
           client.listAssignmentGroups(course_id, {
             include: ['assignments', 'submission', 'score_statistics'],
           }),
-          client.getCourseSyllabus(course_id).catch(() => null),
+          include_syllabus
+            ? client.getCourseSyllabus(course_id).catch(() => null)
+            : Promise.resolve(null),
         ]);
 
         const usesWeights = course.apply_assignment_group_weights;
@@ -363,33 +372,12 @@ export function registerGradeAnalysisTools(server: McpServer) {
         const gradeIf80 = projectGrade(groups, usesWeights, 80);
         const gradeIf60 = projectGrade(groups, usesWeights, 60);
 
-        return formatSuccess({
+        // Build response with analysis FIRST for quick insights
+        const response: Record<string, unknown> = {
           course_name: course.name,
           course_code: course.course_code,
           uses_weighted_groups: usesWeights,
           overall_current_score: overallCurrentScore,
-          // Include syllabus so the LLM can cross-reference grading policies,
-          // late policies, grading scales, and other details Canvas doesn't expose via API
-          syllabus: syllabus
-            ? {
-                available: true,
-                text: syllabus.text,
-                note: 'Cross-reference this syllabus with the grade data below. The syllabus is the source of truth for grading policies, letter grade cutoffs, late penalties, drop rules, and extra credit. Flag any discrepancies between Canvas data and syllabus policies.',
-              }
-            : { available: false, note: 'No syllabus found — grade data is from Canvas API only.' },
-          groups: groups.map(g => ({
-            name: g.name,
-            weight: g.weight,
-            earned_points: g.earned_points,
-            possible_points: g.possible_points,
-            group_percentage: g.group_percentage,
-            weighted_contribution: g.weighted_contribution,
-            drop_lowest: g.drop_lowest,
-            drop_highest: g.drop_highest,
-            graded_count: g.graded_count,
-            total_count: g.total_count,
-            assignments: g.assignments,
-          })),
           analysis: {
             strongest_group: strongest
               ? { name: strongest.name, percentage: strongest.group_percentage }
@@ -402,7 +390,30 @@ export function registerGradeAnalysisTools(server: McpServer) {
             grade_if_80pct: gradeIf80,
             grade_if_60pct: gradeIf60,
           },
-        });
+          groups: groups.map(g => ({
+            name: g.name,
+            weight: g.weight,
+            earned_points: g.earned_points,
+            possible_points: g.possible_points,
+            group_percentage: g.group_percentage,
+            weighted_contribution: g.weighted_contribution,
+            ...(g.drop_lowest ? { drop_lowest: g.drop_lowest } : {}),
+            ...(g.drop_highest ? { drop_highest: g.drop_highest } : {}),
+            graded_count: g.graded_count,
+            total_count: g.total_count,
+            assignments: g.assignments,
+          })),
+        };
+
+        if (include_syllabus && syllabus) {
+          response.syllabus = {
+            available: true,
+            text: syllabus.text,
+            note: 'Cross-reference this syllabus with the grade data above for grading policies, letter grade cutoffs, late penalties, and drop rules.',
+          };
+        }
+
+        return formatSuccess(response);
       } catch (error) {
         return formatError('getting grade breakdown', error);
       }
@@ -585,9 +596,6 @@ export function registerGradeAnalysisTools(server: McpServer) {
         const neededPercentage = neededScore !== null
           ? Math.round((neededScore / pointsPossible) * 1000) / 10
           : null;
-
-        // Determine if the target is achievable (needed score <= 150% of points_possible)
-        const achievable = neededScore !== null && neededScore <= maxScore;
 
         // If binary search couldn't find a solution (lo converged to hi at maxScore), it's not achievable
         const isUnachievable = neededScore === null || neededScore > maxScore - 0.01;

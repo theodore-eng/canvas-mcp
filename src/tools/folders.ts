@@ -10,7 +10,7 @@ export function registerFolderTools(server: McpServer) {
     'list_course_folders',
     'List all folders in a course, showing the full folder tree with file and subfolder counts for each folder.',
     {
-      course_id: z.number().describe('The Canvas course ID'),
+      course_id: z.number().int().positive().describe('The Canvas course ID'),
     },
     async ({ course_id }) => {
       try {
@@ -42,7 +42,7 @@ export function registerFolderTools(server: McpServer) {
     'browse_folder',
     'Browse the contents of a specific folder — returns both subfolders and files within it. Use list_course_folders first to find folder IDs.',
     {
-      folder_id: z.number().describe('The Canvas folder ID'),
+      folder_id: z.number().int().positive().describe('The Canvas folder ID'),
     },
     async ({ folder_id }) => {
       try {

@@ -48,10 +48,14 @@ export function registerSemesterTools(server: McpServer) {
     },
     async ({ base_path, include_external_tools }) => {
       try {
-        // 1. Resolve base path
+        // 1. Resolve base path (SEC-05: validate under $HOME)
         const resolvedBasePath = base_path
           ? base_path.replace(/^~/, os.homedir())
           : join(os.homedir(), 'Canvas');
+        const absoluteBasePath = join(resolvedBasePath); // resolve relative paths
+        if (!absoluteBasePath.startsWith(os.homedir())) {
+          throw new Error('Path must be under home directory');
+        }
 
         // 2. Get active courses with term info
         const allCourses = await client.listCourses({

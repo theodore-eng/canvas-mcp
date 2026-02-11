@@ -8,9 +8,9 @@ export function registerPageTools(server: McpServer) {
 
   server.tool(
     'list_pages',
-    'List wiki/content pages in a course',
+    'List wiki/content pages in a course. Use this when you need wiki pages specifically. For general content, use list_modules.',
     {
-      course_id: z.number().describe('The Canvas course ID'),
+      course_id: z.number().int().positive().describe('The Canvas course ID'),
       search_term: z.string().optional().describe('Search term to filter pages by title'),
       sort: z.enum(['title', 'created_at', 'updated_at']).optional().describe('Sort pages by field'),
     },
@@ -66,7 +66,7 @@ export function registerPageTools(server: McpServer) {
     'get_page_content',
     'Read the full content of a course page as clean text. Great for reading syllabi, lecture notes, and course info pages.',
     {
-      course_id: z.number().describe('The Canvas course ID'),
+      course_id: z.number().int().positive().describe('The Canvas course ID'),
       page_url: z.string().describe('The page URL slug (e.g., "syllabus" or "week-3-notes") or page ID'),
     },
     async ({ course_id, page_url }) => {

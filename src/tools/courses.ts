@@ -67,7 +67,7 @@ export function registerCourseTools(server: McpServer) {
 
   server.tool(
     'get_course_syllabus',
-    'Get the full syllabus for a course. The syllabus is the source of truth for grading policies, letter grade scales, late penalties, drop rules, extra credit, office hours, course schedule, and exam dates. Always check the syllabus before answering questions about how a course works.',
+    'Get the full syllabus for a course. Searches syllabus_body first, then scans modules for syllabus-like pages and files. The syllabus is the source of truth for grading policies, letter grade scales, late penalties, drop rules, extra credit, office hours, course schedule, and exam dates. Always check the syllabus before answering questions about how a course works.',
     {
       course_id: z.number().int().positive().describe('The Canvas course ID'),
     },
@@ -85,7 +85,7 @@ export function registerCourseTools(server: McpServer) {
 
         // Fallback: scan modules for syllabus-like items
         const modules = await client.listModules(course_id, { include: ['items'] });
-        const syllabusKeywords = ['syllabus', 'course information', 'course overview', 'course info'];
+        const syllabusKeywords = ['syllabus', 'course information', 'course overview', 'course info', 'course schedule'];
 
         for (const mod of modules) {
           if (!mod.items) continue;
@@ -137,84 +137,6 @@ export function registerCourseTools(server: McpServer) {
         });
       } catch (error) {
         return formatError('getting course syllabus', error);
-      }
-    }
-  );
-
-  server.tool(
-    'find_syllabus',
-    'Smart syllabus finder that searches multiple locations. Use this when get_course_syllabus returns empty — it scans modules for syllabus files and pages. Checks: 1) syllabus_body field, 2) module items with "syllabus" or "course information" in title.',
-    {
-      course_id: z.number().int().positive().describe('The Canvas course ID'),
-    },
-    async ({ course_id }) => {
-      try {
-        // Step 1: Try the standard syllabus_body
-        const directSyllabus = await client.getCourseSyllabus(course_id);
-        if (directSyllabus) {
-          return formatSuccess({
-            course_id,
-            source: 'syllabus_body',
-            course_name: directSyllabus.course_name,
-            syllabus: directSyllabus.text,
-          });
-        }
-
-        // Step 2: Scan modules for syllabus-like items
-        const modules = await client.listModules(course_id, { include: ['items'] });
-        const syllabusKeywords = ['syllabus', 'course information', 'course overview', 'course info', 'course schedule'];
-
-        for (const mod of modules) {
-          if (!mod.items) continue;
-          for (const item of mod.items) {
-            const titleLower = item.title.toLowerCase();
-            const isSyllabusItem = syllabusKeywords.some(kw => titleLower.includes(kw));
-            if (!isSyllabusItem) continue;
-
-            if (item.type === 'Page' && item.page_url) {
-              try {
-                const page = await client.getPage(course_id, item.page_url);
-                if (page.body) {
-                  return formatSuccess({
-                    course_id,
-                    source: 'module_page',
-                    module: mod.name,
-                    title: item.title,
-                    syllabus: stripHtmlTags(page.body),
-                  });
-                }
-              } catch { /* page not accessible, continue searching */ }
-            }
-
-            if (item.type === 'File' && item.content_id) {
-              try {
-                const file = await client.getFile(item.content_id);
-                const arrayBuffer = await client.downloadFile(file.url);
-                const buffer = Buffer.from(arrayBuffer);
-                const { extractTextFromFile } = await import('../utils.js');
-                const extracted = await extractTextFromFile(buffer, file['content-type'], 50000);
-                if (extracted) {
-                  return formatSuccess({
-                    course_id,
-                    source: 'module_file',
-                    module: mod.name,
-                    title: item.title,
-                    file_name: file.display_name,
-                    syllabus: extracted.text,
-                  });
-                }
-              } catch { /* file not accessible, continue searching */ }
-            }
-          }
-        }
-
-        return formatSuccess({
-          course_id,
-          syllabus_found: false,
-          message: 'No syllabus found in syllabus_body or module items. The syllabus may be hosted in an external tool.',
-        });
-      } catch (error) {
-        return formatError('finding syllabus', error);
       }
     }
   );

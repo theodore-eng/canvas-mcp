@@ -1,62 +1,12 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getCanvasClient } from '../canvas-client.js';
-import { formatError, formatSuccess, stripHtmlTags, runWithConcurrency } from '../utils.js';
-
-// Lightweight keyword lists for inline untracked work scanning
-const untrackedKeywords = ['read', 'reading', 'chapter', 'prepare', 'before class', 'homework', 'practice'];
+import { formatError, formatSuccess, stripHtmlTags, runWithConcurrency, extractDateFromText } from '../utils.js';
+import { detectGradeDeflation } from '../services/grade-utils.js';
+import { classifySubHeader } from './untracked.js';
 
 // Exam/quiz detection pattern
 const examPattern = /exam|midterm|final|quiz|test/i;
-
-/**
- * Inline lightweight date extraction from text for untracked work scanning.
- * Looks for "Month Day" patterns (e.g., "Feb 10", "March 3") and MM/DD patterns.
- */
-function extractDateFromText(text: string, referenceYear: number): Date | null {
-  const months: Record<string, number> = {
-    jan: 0, january: 0, feb: 1, february: 1, mar: 2, march: 2,
-    apr: 3, april: 3, may: 4, jun: 5, june: 5, jul: 6, july: 6,
-    aug: 7, august: 7, sep: 8, september: 8, sept: 8,
-    oct: 9, october: 9, nov: 10, november: 10, dec: 11, december: 11,
-  };
-
-  // Pattern 1: "Month Day" (e.g., "Feb 10", "March 3")
-  const monthDayPattern = /\b([A-Z][a-z]+\.?)\s+(\d{1,2})\b/;
-  const match1 = text.match(monthDayPattern);
-  if (match1) {
-    const cleaned = match1[1].toLowerCase().replace(/\.$/, '');
-    const month = months[cleaned];
-    const day = parseInt(match1[2], 10);
-    if (month !== undefined && !isNaN(day) && day >= 1 && day <= 31) {
-      return new Date(referenceYear, month, day);
-    }
-  }
-
-  // Pattern 2: MM/DD format
-  const mmddPattern = /\b(\d{1,2})\/(\d{1,2})\b/;
-  const match2 = text.match(mmddPattern);
-  if (match2) {
-    const month = parseInt(match2[1], 10) - 1;
-    const day = parseInt(match2[2], 10);
-    if (month >= 0 && month <= 11 && day >= 1 && day <= 31) {
-      return new Date(referenceYear, month, day);
-    }
-  }
-
-  return null;
-}
-
-/**
- * Classify an untracked SubHeader item type based on keywords.
- */
-function classifyUntrackedType(title: string): string | null {
-  const lower = title.toLowerCase();
-  if (['read', 'reading', 'chapter'].some(kw => lower.includes(kw))) return 'reading';
-  if (['prepare', 'before class'].some(kw => lower.includes(kw))) return 'prep';
-  if (['homework', 'practice'].some(kw => lower.includes(kw))) return 'homework';
-  return null;
-}
 
 export function registerDashboardTools(server: McpServer) {
   const client = getCanvasClient();
@@ -97,7 +47,7 @@ export function registerDashboardTools(server: McpServer) {
 
         const courses = coursesResult.status === 'fulfilled' ? coursesResult.value : [];
         const todos = todosResult.status === 'fulfilled' ? todosResult.value : [];
-        const plannerItems = plannerResult.status === 'fulfilled' ? plannerResult.value : [];
+        // plannerResult extracted above for error-detection; items processed in sections below
 
         if (coursesResult.status === 'rejected') warnings.push('Could not load courses');
         if (todosResult.status === 'rejected') warnings.push('Could not load todo items');
@@ -349,11 +299,7 @@ export function registerDashboardTools(server: McpServer) {
             for (const item of mod.items) {
               if (item.type !== 'SubHeader') continue;
 
-              const lower = item.title.toLowerCase();
-              const matchesKeyword = untrackedKeywords.some(kw => lower.includes(kw));
-              if (!matchesKeyword) continue;
-
-              const itemType = classifyUntrackedType(item.title);
+              const itemType = classifySubHeader(item.title);
               if (!itemType) continue;
 
               // Try to extract a date from the title
@@ -432,37 +378,14 @@ export function registerDashboardTools(server: McpServer) {
             current_grade: currentGrade,
           };
 
-          // Check for future-dated assignments graded as 0 (simplified deflation check)
+          // Check for future-dated assignments graded as 0 (deflation check)
           const courseAssignments = assignmentData.find(ad => ad.courseId === c.id);
           if (courseAssignments) {
-            let futureZeroCount = 0;
-            let totalEarned = 0;
-            let totalPossible = 0;
-            let futureZeroPossible = 0;
-
-            for (const a of courseAssignments.assignments) {
-              if (!a.published || a.omit_from_final_grade) continue;
-              const sub = a.submission;
-              if (!sub || sub.workflow_state !== 'graded' || sub.score === null) continue;
-
-              totalEarned += sub.score;
-              totalPossible += a.points_possible;
-
-              if (sub.score === 0 && a.due_at && new Date(a.due_at) > now) {
-                futureZeroCount++;
-                futureZeroPossible += a.points_possible;
-              }
-            }
-
-            if (futureZeroCount > 0 && totalPossible > 0) {
-              const adjPossible = totalPossible - futureZeroPossible;
-              if (adjPossible > 0) {
-                const adjustedScore = Math.round((totalEarned / adjPossible) * 10000) / 100;
-                gradeEntry.adjusted_score = adjustedScore;
-
-                if (Math.abs(currentScore - adjustedScore) > 5) {
-                  gradeEntry.grade_alert = `${futureZeroCount} future-dated assignment(s) graded as 0 may be deflating your score. Canvas shows ${currentScore}% but excluding future zeros gives ${adjustedScore}%.`;
-                }
+            const deflation = detectGradeDeflation(courseAssignments.assignments, now, currentScore);
+            if (deflation.futureZeroCount > 0 && deflation.adjustedScore !== null) {
+              gradeEntry.adjusted_score = deflation.adjustedScore;
+              if (deflation.deflationWarning) {
+                gradeEntry.grade_alert = deflation.deflationWarning;
               }
             }
           }

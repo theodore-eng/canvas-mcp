@@ -1,8 +1,8 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getCanvasClient } from '../canvas-client.js';
-import { formatError, formatSuccess, runWithConcurrency } from '../utils.js';
-import type { Module, ModuleItem, Course } from '../types/canvas.js';
+import { formatError, formatSuccess, runWithConcurrency, extractDateFromText } from '../utils.js';
+import type { Module, Course } from '../types/canvas.js';
 
 // Keyword lists for classifying SubHeader items
 const readingKeywords = ['read', 'reading', 'chapter', 'pp.', 'pages', 'article', 'paper', 'textbook'];
@@ -28,7 +28,7 @@ interface UntrackedItem {
  * Classify a SubHeader title against keyword lists.
  * Returns the matching type or null if no match.
  */
-function classifySubHeader(title: string): UntrackedType | null {
+export function classifySubHeader(title: string): UntrackedType | null {
   const lower = title.toLowerCase();
 
   // Check in priority order: reading > prep > homework > discussion
@@ -40,71 +40,7 @@ function classifySubHeader(title: string): UntrackedType | null {
   return null;
 }
 
-/**
- * Parse a month name abbreviation (e.g., "Feb", "Feb.", "February") into a 0-indexed month number.
- */
-function parseMonthName(monthStr: string): number | null {
-  const months: Record<string, number> = {
-    jan: 0, january: 0,
-    feb: 1, february: 1,
-    mar: 2, march: 2,
-    apr: 3, april: 3,
-    may: 4,
-    jun: 5, june: 5,
-    jul: 6, july: 6,
-    aug: 7, august: 7,
-    sep: 8, september: 8, sept: 8,
-    oct: 9, october: 9,
-    nov: 10, november: 10,
-    dec: 11, december: 11,
-  };
-  const cleaned = monthStr.toLowerCase().replace(/\.$/, '');
-  return months[cleaned] ?? null;
-}
-
-/**
- * Try to extract a date from a string using various patterns.
- * Returns a Date object or null.
- */
-function extractDateFromText(text: string, referenceYear: number): Date | null {
-  // Pattern 1: "(Tue, Feb 10)" or "(Monday, March 3)" — day-of-week + month + day
-  const dowMonthDay = /\((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s+([A-Z][a-z]+\.?\s+\d{1,2})\)/i;
-  const match1 = text.match(dowMonthDay);
-  if (match1) {
-    const parts = match1[1].trim().split(/\s+/);
-    if (parts.length === 2) {
-      const month = parseMonthName(parts[0]);
-      const day = parseInt(parts[1], 10);
-      if (month !== null && !isNaN(day) && day >= 1 && day <= 31) {
-        return new Date(referenceYear, month, day);
-      }
-    }
-  }
-
-  // Pattern 2: "Feb 10" or "March 3" standalone (month name + day)
-  const monthDayPattern = /\b([A-Z][a-z]+\.?)\s+(\d{1,2})\b/;
-  const match2 = text.match(monthDayPattern);
-  if (match2) {
-    const month = parseMonthName(match2[1]);
-    const day = parseInt(match2[2], 10);
-    if (month !== null && !isNaN(day) && day >= 1 && day <= 31) {
-      return new Date(referenceYear, month, day);
-    }
-  }
-
-  // Pattern 3: MM/DD format
-  const mmddPattern = /\b(\d{1,2})\/(\d{1,2})\b/;
-  const match3 = text.match(mmddPattern);
-  if (match3) {
-    const month = parseInt(match3[1], 10) - 1; // 0-indexed
-    const day = parseInt(match3[2], 10);
-    if (month >= 0 && month <= 11 && day >= 1 && day <= 31) {
-      return new Date(referenceYear, month, day);
-    }
-  }
-
-  return null;
-}
+// parseMonthName and extractDateFromText imported from utils.ts
 
 /**
  * Compute the Monday of "Week N" relative to a semester start.
@@ -301,7 +237,7 @@ export function registerUntrackedTools(server: McpServer) {
           const course = await client.getCourse(course_id);
           courses = [course];
         } else {
-          const allCourses = await client.listCourses({ enrollment_state: 'active', state: ['available'] });
+          const allCourses = await client.getActiveCourses();
           // Filter out past courses by term end date
           const now = new Date();
           courses = allCourses.filter(course => {
@@ -406,11 +342,11 @@ export function registerUntrackedTools(server: McpServer) {
             confidence: item.confidence,
             source: {
               module_name: item.moduleName,
-              item_type: 'SubHeader' as const,
+              source_type: 'module_heading',
               module_position: item.modulePosition,
             },
           })),
-          note: 'These items don\'t appear on your Canvas calendar or planner. They are extracted from module SubHeaders and context.',
+          note: 'These items don\'t appear on your Canvas calendar or planner. They are extracted from module headings and context.',
         });
       } catch (error) {
         return formatError('scanning for untracked work', error);

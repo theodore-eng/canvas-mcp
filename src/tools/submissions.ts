@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getCanvasClient } from '../canvas-client.js';
-import { formatError, formatSuccess } from '../utils.js';
+import { formatError, formatSuccess, sanitizeHtmlForSubmission } from '../utils.js';
 
 export function registerSubmissionTools(server: McpServer) {
   const client = getCanvasClient();
@@ -100,7 +100,7 @@ export function registerSubmissionTools(server: McpServer) {
 
           const submission = await client.submitAssignment(course_id, assignment_id, {
             submission_type,
-            body,
+            body: body ? sanitizeHtmlForSubmission(body) : undefined,
             url,
           });
 

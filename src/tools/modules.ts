@@ -84,11 +84,7 @@ export function registerModuleTools(server: McpServer) {
         if (course_ids && course_ids.length > 0) {
           contextCodes = course_ids.map(id => `course_${id}`);
         } else {
-          const courses = await client.listCourses({
-            enrollment_state: 'active',
-            state: ['available'],
-          });
-          contextCodes = courses.map(c => `course_${c.id}`);
+          contextCodes = await client.getActiveCourseContextCodes();
         }
 
         const announcements = await client.listAnnouncements({

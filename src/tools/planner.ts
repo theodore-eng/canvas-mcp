@@ -10,7 +10,7 @@ export function registerPlannerTools(server: McpServer) {
 
   server.tool(
     'get_planner_items',
-    'Get items from your Canvas planner — assignments, quizzes, discussions, and notes organized by date. This is the most complete view of what you need to do.',
+    'Get items from your Canvas planner — assignments, quizzes, discussions, and notes organized by date. Use this for detailed planner data with date filtering and type filtering.',
     {
       start_date: z.string().optional()
         .describe('Start date (YYYY-MM-DD). Defaults to today.'),
@@ -145,7 +145,7 @@ export function registerPlannerTools(server: McpServer) {
         if (todo_date !== undefined) params.todo_date = todo_date;
         if (course_id !== undefined) params.course_id = course_id;
 
-        const note = await client.updatePlannerNote(note_id, params as any);
+        const note = await client.updatePlannerNote(note_id, params as Partial<import('../types/canvas.js').CreatePlannerNoteParams>);
 
         return formatSuccess({
           success: true,

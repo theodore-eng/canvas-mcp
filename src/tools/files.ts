@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { writeFile, mkdir } from 'fs/promises';
-import { join } from 'path';
+import path from 'node:path';
+import os from 'node:os';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getCanvasClient } from '../canvas-client.js';
 import {
@@ -34,7 +35,7 @@ export function registerFileTools(server: McpServer) {
     'list_course_files',
     'Browse files in a course. Can filter by file type (e.g., PDFs only). Optionally categorize files by module context or include hidden files.',
     {
-      course_id: z.number().describe('The Canvas course ID'),
+      course_id: z.number().int().positive().describe('The Canvas course ID'),
       content_type: z.string().optional()
         .describe('Filter by MIME type (e.g., "application/pdf", "text/plain")'),
       search_term: z.string().optional()
@@ -94,8 +95,6 @@ export function registerFileTools(server: McpServer) {
           }
         }
 
-        let usedDirectApi = false;
-
         try {
           // Try the direct Files API first
           const files = await client.listCourseFiles(course_id, {
@@ -103,8 +102,6 @@ export function registerFileTools(server: McpServer) {
             search_term,
             sort,
           });
-
-          usedDirectApi = true;
 
           formattedFiles = files.map(f => {
             const fileId = f.id;
@@ -251,7 +248,7 @@ export function registerFileTools(server: McpServer) {
     'get_file_info',
     'Get metadata for a specific file including its download URL',
     {
-      file_id: z.number().describe('The Canvas file ID'),
+      file_id: z.number().int().positive().describe('The Canvas file ID'),
     },
     async ({ file_id }) => {
       try {
@@ -278,7 +275,7 @@ export function registerFileTools(server: McpServer) {
     'read_file_content',
     'Download a file from Canvas and extract its text content. Supports PDFs, plain text, HTML, CSV, and Markdown files. Use this to read lecture notes, slides, or handouts without having to download them manually.',
     {
-      file_id: z.number().describe('The Canvas file ID (get this from list_course_files or list_modules)'),
+      file_id: z.number().int().positive().describe('The Canvas file ID (get this from list_course_files or list_modules)'),
       max_length: z.number().optional().default(DEFAULT_MAX_TEXT_LENGTH)
         .describe(`Maximum characters to return (default ${DEFAULT_MAX_TEXT_LENGTH}). Useful for very large files.`),
     },
@@ -352,24 +349,37 @@ export function registerFileTools(server: McpServer) {
           });
         }
 
+        // SEC-05: Validate target_path is under $HOME
+        const expandedTargetPath = target_path.replace(/^~/, os.homedir());
+        const resolvedTargetPath = path.resolve(expandedTargetPath);
+        if (!resolvedTargetPath.startsWith(os.homedir())) {
+          throw new Error('Path must be under home directory');
+        }
+
         // Create target directory if it doesn't exist
-        await mkdir(target_path, { recursive: true });
+        await mkdir(resolvedTargetPath, { recursive: true });
 
         // Download the file from Canvas
         const arrayBuffer = await client.downloadFile(file.url);
         const buffer = Buffer.from(arrayBuffer);
 
-        // Write to disk
-        const localPath = join(target_path, file.filename);
-        await writeFile(localPath, buffer);
+        // SEC-01: Sanitize filename to prevent path traversal
+        const safeName = path.basename(file.filename).replace(/[/\\]/g, '_');
+        const localPath = path.join(resolvedTargetPath, safeName);
+        const resolvedLocalPath = path.resolve(localPath);
+        if (!resolvedLocalPath.startsWith(resolvedTargetPath)) {
+          throw new Error('Filename would write outside target directory');
+        }
+
+        await writeFile(resolvedLocalPath, buffer);
 
         return formatSuccess({
           id: file.id,
-          filename: file.filename,
+          filename: safeName,
           size_bytes: file.size,
           size_human: formatFileSize(file.size),
-          local_path: localPath,
-          message: `File downloaded successfully to ${localPath}`,
+          local_path: resolvedLocalPath,
+          message: `File downloaded successfully to ${resolvedLocalPath}`,
         });
       } catch (error) {
         return formatError('downloading file', error);

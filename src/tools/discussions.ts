@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getCanvasClient } from '../canvas-client.js';
-import { formatError, formatSuccess, stripHtmlTags } from '../utils.js';
+import { formatError, formatSuccess, stripHtmlTags, sanitizeHtmlForSubmission } from '../utils.js';
 
 export function registerDiscussionTools(server: McpServer) {
   const client = getCanvasClient();
@@ -125,7 +125,7 @@ export function registerDiscussionTools(server: McpServer) {
       },
       async ({ course_id, topic_id, message }) => {
         try {
-          const entry = await client.postDiscussionEntry(course_id, topic_id, message);
+          const entry = await client.postDiscussionEntry(course_id, topic_id, sanitizeHtmlForSubmission(message));
 
           return formatSuccess({
             success: true,
@@ -158,7 +158,7 @@ export function registerDiscussionTools(server: McpServer) {
             course_id,
             topic_id,
             entry_id,
-            message
+            sanitizeHtmlForSubmission(message)
           );
 
           return formatSuccess({

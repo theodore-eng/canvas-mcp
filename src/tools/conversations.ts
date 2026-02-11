@@ -57,7 +57,7 @@ export function registerConversationTools(server: McpServer) {
     'get_conversation',
     'Get a specific conversation with all its messages. Shows the full message thread with author names and message bodies.',
     {
-      conversation_id: z.number()
+      conversation_id: z.number().int().positive()
         .describe('The ID of the conversation to retrieve.'),
     },
     async ({ conversation_id }) => {
