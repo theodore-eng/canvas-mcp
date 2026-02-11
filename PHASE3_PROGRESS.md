@@ -1,6 +1,6 @@
 # Phase 3 Implementation Progress
 
-## Status: Push 1 COMPLETE — Push 2 IN PROGRESS
+## Status: Push 1 COMPLETE — Push 2 COMPLETE — Push 3 IN PROGRESS
 
 ## Push 1: Foundation Fixes (COMPLETE - commit 233d936)
 - [x] Bug #8: Grade deflation detection (grades.ts) — adjusted_score, deflation_warning
@@ -13,16 +13,18 @@
 
 **New tool added:** `calculate_target_grade` (registered via existing registerGradeAnalysisTools)
 
-## Push 2: New Capabilities (NEXT)
-- [ ] Bug #4: File categorization via module context (files.ts)
-- [ ] Bug #3: Hidden files via include_hidden param (files.ts)
-- [ ] Bug #5: File download tool (files.ts)
-- [ ] Bug #6: Untracked work scanner (NEW untracked.ts)
-- [ ] Bug #9: Differentiate overview tool descriptions
-- [ ] Bug #14: Calendar default date range fix
-- [ ] Bug #15: Planner note details round-trip
+## Push 2: New Capabilities (COMPLETE - commit 954b1e3)
+- [x] Bug #4: File categorization via module context (files.ts) — categorize param, categorizeFile() helper
+- [x] Bug #3: Hidden files via include_hidden param (files.ts) — cross-references modules
+- [x] Bug #5: File download tool (files.ts) — new download_file tool
+- [x] Bug #6: Untracked work scanner (NEW untracked.ts) — scan_untracked_work tool
+- [x] Bug #9: Differentiate overview tool descriptions (dashboard.ts, search.ts)
+- [x] Bug #14: Calendar default date range — already fixed, confirmed
+- [x] Bug #15: Planner note details round-trip (planner.ts, canvas.ts)
 
-## Push 3: Major Features (AFTER Push 2)
+**New tools added:** `download_file`, `scan_untracked_work` (registered in index.ts)
+
+## Push 3: Major Features (IN PROGRESS)
 - [ ] Bug #7: Semester setup tool (NEW semester.ts)
 - [ ] Bug #17: Daily briefing redesign (dashboard.ts rewrite)
 
@@ -30,4 +32,4 @@
 1. Read this file for current state
 2. Read MEMORY.md for project context
 3. Run `npm run build` to verify clean state
-4. Continue from Push 2
+4. Continue from Push 3

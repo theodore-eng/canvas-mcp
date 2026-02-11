@@ -28,13 +28,14 @@ import { registerFolderTools } from './tools/folders.js';
 import { registerActivityTools } from './tools/activity.js';
 import { registerPreferenceTools } from './tools/preferences.js';
 import { registerUntrackedTools } from './tools/untracked.js';
+import { registerSemesterTools } from './tools/semester.js';
 
 // Import prompt and resource registration
 import { registerPrompts } from './prompts.js';
 import { registerResources } from './resources.js';
 import { getCanvasClient } from './canvas-client.js';
 
-const SERVER_VERSION = '2.3.0';
+const SERVER_VERSION = '2.4.0';
 
 // Validate required environment variables
 function validateEnvironment(): void {
@@ -105,6 +106,9 @@ async function main(): Promise<void> {
   // Untracked work scanner (always active — read only)
   registerUntrackedTools(server);
 
+  // Semester setup (always active — creates local folders + saves preferences)
+  registerSemesterTools(server);
+
   // Submission & discussion tools (write tools gated by ENABLE_WRITE_TOOLS)
   registerSubmissionTools(server);
   registerDiscussionTools(server);
@@ -131,7 +135,8 @@ async function main(): Promise<void> {
   console.error('Active features:');
   console.error('  Tools:     courses, syllabus, find-syllabus, course-tools, assignments, modules,');
   console.error('             search, grades, grade-analysis, todos, pages, calendar, files,');
-  console.error('             planner, dashboard, feedback, conversations, folders, activity, preferences');
+  console.error('             planner, dashboard, feedback, conversations, folders, activity,');
+  console.error('             preferences, untracked-work, semester-setup');
   console.error('  Fallbacks: pages→modules, files→modules, syllabus→modules, search→modules');
   console.error('  Prompts:   weekly_review, study_plan, assignment_helper, quick_check,');
   console.error('             grade_analysis, catch_up, end_of_semester, submission_review,');
