@@ -116,6 +116,7 @@ export function registerPlannerTools(server: McpServer) {
           note: {
             id: note.id,
             title: note.title,
+            details: note.details ?? null,
             todo_date: note.todo_date,
             course_id: note.course_id,
           },
@@ -152,6 +153,7 @@ export function registerPlannerTools(server: McpServer) {
           note: {
             id: note.id,
             title: note.title,
+            details: note.details ?? null,
             todo_date: note.todo_date,
             course_id: note.course_id,
           },

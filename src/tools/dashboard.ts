@@ -8,7 +8,7 @@ export function registerDashboardTools(server: McpServer) {
 
   server.tool(
     'daily_briefing',
-    'Get a complete daily overview: today\'s events, upcoming deadlines, recent grades, unread announcements, and todo items. The best way to start your day or check in on everything at once.',
+    'Get a comprehensive daily dashboard: today\'s classes, urgent deadlines, grades, announcements, and a week-ahead preview. Use this for your morning check-in or full status overview — it\'s the broadest single view of your academic day.',
     {
       days_ahead: z.number().optional().default(7)
         .describe('How many days ahead to look for upcoming work (default: 7)'),

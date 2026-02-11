@@ -310,7 +310,7 @@ export function registerSearchTools(server: McpServer) {
 
   server.tool(
     'get_all_upcoming_work',
-    'Get all upcoming (and optionally overdue) work across all courses or a specific course — assignments, quizzes, discussions, and more. The best single view of everything due soon. Replaces get_upcoming_assignments and get_overdue_assignments.',
+    'Get a focused list of upcoming assignments, quizzes, and discussions due soon, sorted by due date. Use this when you specifically need to know what work is coming up, not a full dashboard. Supports filtering by course and including overdue items.',
     {
       days_ahead: z.number().optional().default(7)
         .describe('Number of days to look ahead (default: 7)'),

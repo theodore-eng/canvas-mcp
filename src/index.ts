@@ -27,6 +27,7 @@ import { registerConversationTools } from './tools/conversations.js';
 import { registerFolderTools } from './tools/folders.js';
 import { registerActivityTools } from './tools/activity.js';
 import { registerPreferenceTools } from './tools/preferences.js';
+import { registerUntrackedTools } from './tools/untracked.js';
 
 // Import prompt and resource registration
 import { registerPrompts } from './prompts.js';
@@ -100,6 +101,9 @@ async function main(): Promise<void> {
 
   // User preferences & learning system (always active)
   registerPreferenceTools(server);
+
+  // Untracked work scanner (always active — read only)
+  registerUntrackedTools(server);
 
   // Submission & discussion tools (write tools gated by ENABLE_WRITE_TOOLS)
   registerSubmissionTools(server);

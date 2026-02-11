@@ -527,6 +527,7 @@ export interface PlannerNote {
   id: number;
   title: string;
   description: string;
+  details?: string;
   user_id: number;
   workflow_state: string;
   course_id: number | null;
