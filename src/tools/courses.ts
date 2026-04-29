@@ -33,11 +33,14 @@ export function registerCourseTools(server: McpServer) {
           state: ['available'],
         });
 
+        // Drop courses Canvas returned as access-restricted stubs ({id, access_restricted_by_date: true}).
+        const accessible = courses.filter(course => !course.access_restricted_by_date && course.name);
+
         // Filter out past courses unless explicitly requested
         const now = new Date();
         const filtered = include_past
-          ? courses
-          : courses.filter(course => {
+          ? accessible
+          : accessible.filter(course => {
               // Keep if term has no end date or end date is in the future
               const endDate = course.term?.end_at ?? course.end_at;
               if (!endDate) return true;

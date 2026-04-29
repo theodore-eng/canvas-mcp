@@ -40,12 +40,12 @@ Open Claude Desktop's config file:
 - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 
-Add this (or merge into existing config):
+Add this (or merge into existing config). Use the server key **`canvas-lms`** and an **absolute** path to `dist/index.js`:
 
 ```json
 {
   "mcpServers": {
-    "canvas": {
+    "canvas-lms": {
       "command": "node",
       "args": ["/FULL/PATH/TO/canvas-mcp/dist/index.js"],
       "env": {
@@ -56,6 +56,8 @@ Add this (or merge into existing config):
   }
 }
 ```
+
+**Quick start (detailed):** For a full step-by-step runbook and troubleshooting, see **[docs/RUNBOOK_CLAUDE_DESKTOP.md](docs/RUNBOOK_CLAUDE_DESKTOP.md)** or **[CLAUDE_DESKTOP_SETUP.md](CLAUDE_DESKTOP_SETUP.md)**.
 
 **Replace:**
 - `/FULL/PATH/TO/canvas-mcp` — the folder where you cloned this repo

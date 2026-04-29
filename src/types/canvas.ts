@@ -20,6 +20,7 @@ export interface Course {
   apply_assignment_group_weights: boolean;
   public_description?: string;
   time_zone?: string;
+  access_restricted_by_date?: boolean;
 }
 
 export interface Term {
