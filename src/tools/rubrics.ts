@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getCanvasClient } from '../canvas-client.js';
 import { formatError, formatSuccess } from '../utils.js';
+import { joinRubricAssessment } from '../services/rubric-join.js';
 
 /**
  * Two read-only tools that surface Canvas rubrics for an assignment and
@@ -106,52 +107,7 @@ export function registerRubricTools(server: McpServer) {
           });
         }
 
-        const ratingById = new Map<string, { description: string; points: number }>();
-        for (const c of assignment.rubric ?? []) {
-          for (const r of c.ratings ?? []) {
-            ratingById.set(r.id, { description: r.description, points: r.points });
-          }
-        }
-
-        // Join template criteria with the assessment.
-        type Joined = {
-          criterion_id: string;
-          description: string;
-          points_possible: number;
-          points_awarded: number | null;
-          points_lost: number | null;
-          rating_id: string | null;
-          rating_description: string | null;
-          comments: string | null;
-        };
-        const joined: Joined[] = [];
-        let totalPossible = 0;
-        let totalAwarded = 0;
-        for (const c of assignment.rubric ?? []) {
-          if (c.ignore_for_scoring) continue;
-          totalPossible += c.points;
-          const entry = submission.rubric_assessment?.[c.id];
-          const awarded = entry?.points ?? null;
-          if (awarded !== null && awarded !== undefined) totalAwarded += awarded;
-          const ratingId = entry?.rating_id ?? null;
-          const ratingMeta = ratingId ? ratingById.get(ratingId) ?? null : null;
-          joined.push({
-            criterion_id: c.id,
-            description: c.description,
-            points_possible: c.points,
-            points_awarded: awarded,
-            points_lost: awarded !== null && awarded !== undefined ? c.points - awarded : null,
-            rating_id: ratingId,
-            rating_description: ratingMeta?.description ?? null,
-            comments: entry?.comments ?? null,
-          });
-        }
-
-        // Rank where points were lost — most-points-lost first; useful for
-        // the rubric-loss-pattern coach later.
-        const lossRanked = [...joined]
-          .filter((j) => j.points_lost !== null && j.points_lost > 0)
-          .sort((a, b) => (b.points_lost ?? 0) - (a.points_lost ?? 0));
+        const join = joinRubricAssessment(assignment.rubric ?? [], submission.rubric_assessment);
 
         return formatSuccess({
           course_id,
@@ -163,11 +119,11 @@ export function registerRubricTools(server: McpServer) {
           has_assessment: true,
           score: submission.score,
           grade: submission.grade,
-          total_points_possible: totalPossible,
-          total_points_awarded: totalAwarded,
-          total_points_lost: totalPossible - totalAwarded,
-          criteria: joined,
-          biggest_losses: lossRanked.slice(0, 3),
+          total_points_possible: join.total_points_possible,
+          total_points_awarded: join.total_points_awarded,
+          total_points_lost: join.total_points_lost,
+          criteria: join.criteria,
+          biggest_losses: join.biggest_losses,
         });
       } catch (error) {
         return formatError('getting submission rubric', error);
