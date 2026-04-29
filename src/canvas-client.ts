@@ -40,6 +40,10 @@ import type {
   Quiz,
   QuizSubmission,
   ListQuizzesParams,
+  LatePolicy,
+  StudentAssignmentAnalytics,
+  Group,
+  GroupMembership,
 } from './types/canvas.js';
 import { stripHtmlTags, stableStringify } from './utils.js';
 
@@ -904,6 +908,66 @@ export class CanvasClient {
     return this.request<unknown>(
       `/courses/${courseId}/rubrics/${rubricId}${query}`
     );
+  }
+
+  // ==================== LATE POLICY ====================
+
+  /**
+   * Per-course late + missing submission policy. Returns null when the
+   * course has no policy set (older courses, or instructor-disabled).
+   * Some Canvas instances 404 instead of returning null — handle both.
+   */
+  async getLatePolicy(courseId: number): Promise<LatePolicy | null> {
+    try {
+      const wrapped = await this.request<{ late_policy: LatePolicy } | LatePolicy>(
+        `/courses/${courseId}/late_policy`,
+      );
+      // Canvas may return wrapped or unwrapped depending on instance.
+      if (wrapped && typeof wrapped === 'object' && 'late_policy' in wrapped) {
+        return wrapped.late_policy ?? null;
+      }
+      return wrapped as LatePolicy;
+    } catch (err) {
+      // 404 = no policy configured for this course; surface as null.
+      if (err instanceof Error && /\b404\b/.test(err.message)) return null;
+      throw err;
+    }
+  }
+
+  // ==================== ANALYTICS ====================
+
+  /**
+   * Per-assignment analytics for the calling user in a course. Some
+   * Canvas instances disable analytics for students — surface as empty
+   * array rather than throwing so daily_briefing doesn't fail.
+   */
+  async getMyAssignmentAnalytics(courseId: number): Promise<StudentAssignmentAnalytics[]> {
+    try {
+      return await this.request<StudentAssignmentAnalytics[]>(
+        `/courses/${courseId}/analytics/users/self/assignments`,
+      );
+    } catch (err) {
+      if (err instanceof Error && /\b40[34]\b/.test(err.message)) return [];
+      throw err;
+    }
+  }
+
+  // ==================== GROUPS ====================
+
+  async listMyGroups(courseId?: number): Promise<Group[]> {
+    if (courseId) {
+      return this.requestPaginated<Group>(`/courses/${courseId}/groups`);
+    }
+    return this.requestPaginated<Group>(`/users/self/groups`);
+  }
+
+  async getGroup(groupId: number, includeUsers = false): Promise<Group> {
+    const query = includeUsers ? this.buildQueryString({ include: ['users'] }) : '';
+    return this.request<Group>(`/groups/${groupId}${query}`);
+  }
+
+  async getGroupMemberships(groupId: number): Promise<GroupMembership[]> {
+    return this.requestPaginated<GroupMembership>(`/groups/${groupId}/memberships`);
   }
 
   // ==================== QUIZZES ====================

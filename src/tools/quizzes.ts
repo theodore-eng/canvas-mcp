@@ -155,7 +155,7 @@ export function registerQuizTools(server: McpServer) {
           attempt_count: subs.length,
           kept_score: latest.kept_score,
           quiz_points_possible: latest.quiz_points_possible,
-          score_pct: latest.kept_score !== null && latest.quiz_points_possible
+          score_pct: latest.kept_score !== null && latest.quiz_points_possible !== null && latest.quiz_points_possible > 0
             ? Math.round((latest.kept_score / latest.quiz_points_possible) * 1000) / 10
             : null,
           latest: {

@@ -821,6 +821,98 @@ export interface ListQuizzesParams {
  * here is authoritative for "did I take this quiz?" — bypasses the
  * indeterminate path in get_my_submission_status.
  */
+// ==================== LATE POLICY ====================
+
+/**
+ * Per-course late and missing submission policy. Drives the actual point
+ * deductions Canvas applies — separate from the assignment-level "late"
+ * boolean. `late_submission_interval` is "day" or "hour".
+ */
+export interface LatePolicy {
+  id: number;
+  course_id: number;
+  missing_submission_deduction_enabled: boolean;
+  /** Percent of total deducted for missing submissions (e.g., 100 → 0). */
+  missing_submission_deduction: number;
+  late_submission_deduction_enabled: boolean;
+  /** Percent deducted per interval (e.g., 10 → −10%/day). */
+  late_submission_deduction: number;
+  late_submission_interval: 'day' | 'hour';
+  /** Floor — Canvas won't deduct below this percent of total. */
+  late_submission_minimum_percent: number;
+  late_submission_minimum_percent_deducted?: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+// ==================== COURSE ANALYTICS ====================
+
+/**
+ * Per-assignment analytics for the calling student. From
+ * /courses/:id/analytics/users/self/assignments — includes timing,
+ * the submission record, and the score statistics across the cohort.
+ */
+export interface StudentAssignmentAnalytics {
+  assignment_id: number;
+  title: string;
+  points_possible: number;
+  due_at: string | null;
+  unlock_at?: string | null;
+  muted?: boolean;
+  min_score?: number | null;
+  max_score?: number | null;
+  median?: number | null;
+  /** First-quartile / third-quartile score across the cohort. */
+  first_quartile?: number | null;
+  third_quartile?: number | null;
+  module_ids?: number[];
+  /** Status from the student's perspective. */
+  status?: 'on_time' | 'late' | 'missing' | 'floating';
+  excused?: boolean;
+  submission?: {
+    posted_at: string | null;
+    submitted_at: string | null;
+    score: number | null;
+  };
+  /** Days late, if late. */
+  late_days?: number;
+}
+
+// ==================== GROUPS ====================
+
+/**
+ * A Canvas group (subset of a group set). Used for group-submission
+ * assignments — TP2-style. Membership maps Theo to teammates.
+ */
+export interface Group {
+  id: number;
+  name: string;
+  description?: string | null;
+  is_public: boolean;
+  followed_by_user?: boolean;
+  join_level?: 'parent_context_auto_join' | 'parent_context_request' | 'invitation_only';
+  members_count: number;
+  avatar_url?: string | null;
+  context_type: string;
+  course_id?: number;
+  account_id?: number;
+  role?: string | null;
+  group_category_id: number;
+  storage_quota_mb?: number;
+  permissions?: Record<string, boolean>;
+  users?: User[];
+}
+
+export interface GroupMembership {
+  id: number;
+  group_id: number;
+  user_id: number;
+  workflow_state: 'accepted' | 'invited' | 'requested';
+  moderator: boolean;
+  just_created?: boolean;
+  user?: User;
+}
+
 export interface QuizSubmission {
   id: number;
   user_id: number;

@@ -438,12 +438,15 @@ export function registerGradeAnalysisTools(server: McpServer) {
     },
     async ({ course_id, hypothetical_scores }) => {
       try {
-        // Fetch course and assignment groups in parallel
-        const [course, assignmentGroups] = await Promise.all([
+        // Fetch course, assignment groups, and late policy in parallel.
+        // late_policy is surfaced in the response so the LLM can factor in
+        // per-day deductions on hypothetical late submissions.
+        const [course, assignmentGroups, latePolicy] = await Promise.all([
           client.getCourse(course_id, ['total_scores']),
           client.listAssignmentGroups(course_id, {
             include: ['assignments', 'submission'],
           }),
+          client.getLatePolicy(course_id).catch(() => null),
         ]);
 
         const usesWeights = course.apply_assignment_group_weights;
@@ -512,6 +515,20 @@ export function registerGradeAnalysisTools(server: McpServer) {
           change: changeStr,
           scenarios_applied: scenariosApplied,
           group_impacts: groupImpacts,
+          // Surface the policy so the LLM can deduct manually for any
+          // hypothetical that's late. Computed projection above does NOT
+          // apply the deduction — caller must pre-deduct the score.
+          late_policy: latePolicy
+            ? {
+                late_deduction_enabled: latePolicy.late_submission_deduction_enabled,
+                late_deduction_pct: latePolicy.late_submission_deduction,
+                late_interval: latePolicy.late_submission_interval,
+                late_floor_pct: latePolicy.late_submission_minimum_percent,
+                missing_deduction_enabled: latePolicy.missing_submission_deduction_enabled,
+                missing_deduction_pct: latePolicy.missing_submission_deduction,
+                hint: 'Hypothetical scores are NOT auto-adjusted for lateness. If a hypothetical assignment is late, pre-deduct the appropriate percent and pass the reduced score.',
+              }
+            : null,
           ...(warnings.length > 0 ? { warnings } : {}),
         });
       } catch (error) {

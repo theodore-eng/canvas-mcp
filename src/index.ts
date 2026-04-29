@@ -31,6 +31,9 @@ import { registerUntrackedTools } from './tools/untracked.js';
 import { registerSemesterTools } from './tools/semester.js';
 import { registerRubricTools } from './tools/rubrics.js';
 import { registerQuizTools } from './tools/quizzes.js';
+import { registerLatePolicyTools } from './tools/late-policy.js';
+import { registerAnalyticsTools } from './tools/analytics.js';
+import { registerGroupTools } from './tools/groups.js';
 
 // Import prompt and resource registration
 import { registerPrompts } from './prompts.js';
@@ -117,6 +120,15 @@ async function main(): Promise<void> {
   // Quiz tools (always active — read only). Closes the indeterminate-quiz
   // gap in get_my_submission_status.
   registerQuizTools(server);
+
+  // Late policy (always active — read only). Powers what-if grade math.
+  registerLatePolicyTools(server);
+
+  // Per-student analytics (always active — read only).
+  registerAnalyticsTools(server);
+
+  // Group set / membership tools (always active — read only).
+  registerGroupTools(server);
 
   // Submission & discussion tools (write tools gated by ENABLE_WRITE_TOOLS)
   registerSubmissionTools(server);
