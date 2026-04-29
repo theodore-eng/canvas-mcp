@@ -729,22 +729,45 @@ export class CanvasClient {
   }
 
   async downloadFile(downloadUrl: string): Promise<ArrayBuffer> {
-    // Canvas file URLs redirect to pre-signed S3 URLs.
-    // We must NOT send the Bearer token on the redirect.
+    // Canvas file URLs redirect to pre-signed S3 URLs (or its CDN). We must
+    // re-validate every redirect hop so a misconfigured or compromised
+    // upstream cannot redirect us off-allowlist (SSRF). We also must NOT
+    // send the Bearer token to the redirect target — fetch() drops auth
+    // headers on cross-origin redirects, but we issue manually anyway.
     if (!this.isAllowedFileUrl(downloadUrl)) {
       throw new Error(`Download URL rejected: hostname not in allowlist`);
     }
 
-    const response = await fetch(downloadUrl, {
-      redirect: 'follow',
-      signal: this.createTimeoutSignal(60_000), // 60s timeout for file downloads
-    });
-
-    if (!response.ok) {
-      throw new Error(`File download error: ${response.status} ${response.statusText}`);
+    let currentUrl = downloadUrl;
+    const MAX_REDIRECT_HOPS = 5;
+    for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
+      const response = await fetch(currentUrl, {
+        redirect: 'manual',
+        signal: this.createTimeoutSignal(60_000),
+      });
+      // 30x: validate Location and re-issue
+      if (response.status >= 300 && response.status < 400) {
+        const next = response.headers.get('location');
+        if (!next) {
+          throw new Error(`File download error: ${response.status} with no Location header`);
+        }
+        // Resolve relative redirects against the current URL
+        const resolved = new URL(next, currentUrl).toString();
+        if (!this.isAllowedFileUrl(resolved)) {
+          throw new Error(`Download redirect rejected: hostname not in allowlist (${new URL(resolved).hostname})`);
+        }
+        if (hop === MAX_REDIRECT_HOPS) {
+          throw new Error(`File download error: too many redirects (>${MAX_REDIRECT_HOPS})`);
+        }
+        currentUrl = resolved;
+        continue;
+      }
+      if (!response.ok) {
+        throw new Error(`File download error: ${response.status} ${response.statusText}`);
+      }
+      return response.arrayBuffer();
     }
-
-    return response.arrayBuffer();
+    throw new Error('File download error: exhausted redirect budget');
   }
 
   // ==================== PAGES ====================

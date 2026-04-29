@@ -12,6 +12,8 @@ import {
   extractTextFromFile,
   runWithConcurrency,
   compileUserPattern,
+  isPathInside,
+  safeCanvasFilename,
   MAX_FILE_SIZE,
   DEFAULT_MAX_TEXT_LENGTH,
 } from '../utils.js';
@@ -360,7 +362,7 @@ export function registerFileTools(server: McpServer) {
         // SEC-05: Validate target_path is under $HOME
         const expandedTargetPath = target_path.replace(/^~/, os.homedir());
         const resolvedTargetPath = path.resolve(expandedTargetPath);
-        if (!resolvedTargetPath.startsWith(os.homedir())) {
+        if (!isPathInside(resolvedTargetPath, os.homedir())) {
           throw new Error('Path must be under home directory');
         }
 
@@ -371,11 +373,11 @@ export function registerFileTools(server: McpServer) {
         const arrayBuffer = await client.downloadFile(file.url);
         const buffer = Buffer.from(arrayBuffer);
 
-        // SEC-01: Sanitize filename to prevent path traversal
-        const safeName = path.basename(file.filename).replace(/[/\\]/g, '_');
+        // SEC-01: Sanitize filename to prevent path traversal + length blow-up
+        const safeName = safeCanvasFilename(file.filename, file.id);
         const localPath = path.join(resolvedTargetPath, safeName);
         const resolvedLocalPath = path.resolve(localPath);
-        if (!resolvedLocalPath.startsWith(resolvedTargetPath)) {
+        if (!isPathInside(resolvedLocalPath, resolvedTargetPath)) {
           throw new Error('Filename would write outside target directory');
         }
 
@@ -422,7 +424,7 @@ export function registerFileTools(server: McpServer) {
         // Path resolution + confinement
         const expandedTarget = target_path.replace(/^~/, os.homedir());
         const resolvedTarget = path.resolve(expandedTarget);
-        if (!resolvedTarget.startsWith(os.homedir())) {
+        if (!isPathInside(resolvedTarget, os.homedir())) {
           throw new Error('target_path must be under home directory');
         }
 
@@ -580,7 +582,7 @@ export function registerFileTools(server: McpServer) {
           const moduleFolder = sanitizeFolder(c.module_label);
           const targetSubdir = path.join(resolvedTarget, moduleFolder);
           const resolvedSubdir = path.resolve(targetSubdir);
-          if (!resolvedSubdir.startsWith(resolvedTarget)) {
+          if (!isPathInside(resolvedSubdir, resolvedTarget)) {
             return {
               file_id: c.file_id,
               name: c.name,
@@ -592,10 +594,20 @@ export function registerFileTools(server: McpServer) {
           }
           await mkdir(resolvedSubdir, { recursive: true });
 
-          const safeName = path.basename(fileMeta.filename).replace(/[/\\]/g, '_');
-          const localPath = path.join(resolvedSubdir, safeName);
+          const baseSafeName = safeCanvasFilename(fileMeta.filename, c.file_id);
+          // Collision-resolve: if the target path already exists, append
+          // the file_id before the extension so concurrent writes don't
+          // silently truncate each other's output.
+          let safeName = baseSafeName;
+          let localPath = path.join(resolvedSubdir, safeName);
+          if (fs.existsSync(localPath)) {
+            const ext = path.extname(baseSafeName);
+            const stem = ext ? baseSafeName.slice(0, -ext.length) : baseSafeName;
+            safeName = `${stem}_${c.file_id}${ext}`;
+            localPath = path.join(resolvedSubdir, safeName);
+          }
           const resolvedLocal = path.resolve(localPath);
-          if (!resolvedLocal.startsWith(resolvedSubdir)) {
+          if (!isPathInside(resolvedLocal, resolvedSubdir)) {
             return {
               file_id: c.file_id,
               name: c.name,
@@ -761,6 +773,7 @@ export function registerFileTools(server: McpServer) {
           module_label: string;
           hits: Array<{ snippet: string; offset: number }>;
           error?: string;
+          text_truncated?: boolean;
         };
 
         // Snapshot regex source/flags to construct a fresh RegExp per task —
@@ -791,11 +804,25 @@ export function registerFileTools(server: McpServer) {
             if (!extracted || !extracted.text) {
               return { file_id: c.file_id, name: c.name, module_label: c.module_label, hits: [] };
             }
-            const text = extracted.text;
+            // Cap the haystack — defense-in-depth against ReDoS by bounding
+            // the input size the V8 regex engine sees per file.
+            const SEARCH_TEXT_CAP = 250_000;
+            const text = extracted.text.length > SEARCH_TEXT_CAP
+              ? extracted.text.slice(0, SEARCH_TEXT_CAP)
+              : extracted.text;
             const localRegex = new RegExp(queryRegexSource, queryRegexFlags);
             const hits: Array<{ snippet: string; offset: number }> = [];
+            // Hard iteration cap so a degenerate zero-width regex can't
+            // keep yielding hits past max_hits_per_file. The localRegex
+            // construction is fresh per task so no shared state.
+            const ITERATION_CAP = 10_000;
+            let iterations = 0;
             let match: RegExpExecArray | null;
-            while ((match = localRegex.exec(text)) !== null && hits.length < max_hits_per_file) {
+            while (
+              (match = localRegex.exec(text)) !== null &&
+              hits.length < max_hits_per_file &&
+              iterations++ < ITERATION_CAP
+            ) {
               const start = Math.max(0, match.index - Math.floor(snippet_chars / 2));
               const end = Math.min(text.length, match.index + match[0].length + Math.floor(snippet_chars / 2));
               const raw = text.slice(start, end).replace(/\s+/g, ' ').trim();
@@ -803,7 +830,14 @@ export function registerFileTools(server: McpServer) {
               // Avoid infinite loop on zero-width matches.
               if (match.index === localRegex.lastIndex) localRegex.lastIndex++;
             }
-            return { file_id: c.file_id, name: c.name, module_label: c.module_label, hits };
+            const truncatedSearch = extracted.text.length > SEARCH_TEXT_CAP;
+            return {
+              file_id: c.file_id,
+              name: c.name,
+              module_label: c.module_label,
+              hits,
+              ...(truncatedSearch ? { text_truncated: true } : {}),
+            };
           } catch (e) {
             return {
               file_id: c.file_id,
@@ -923,15 +957,21 @@ export function registerFileTools(server: McpServer) {
           }
         }
 
-        for (const [fidStr, prior] of Object.entries(snapshotFiles)) {
-          const fid = Number(fidStr);
-          if (!live.has(fid)) {
-            removed.push({
-              file_id: fid,
-              name: prior.filename,
-              module_label: prior.module_label,
-              previous_updated_at: prior.updated_at,
-            });
+        // Removed-file detection is unreliable on the module-fallback path:
+        // the snapshot may include Files-API-only files that aren't reachable
+        // through any module item, and they would all be falsely reported as
+        // "removed". Skip the calculation when we can't trust the live set.
+        if (filesApiAvailable) {
+          for (const [fidStr, prior] of Object.entries(snapshotFiles)) {
+            const fid = Number(fidStr);
+            if (!live.has(fid)) {
+              removed.push({
+                file_id: fid,
+                name: prior.filename,
+                module_label: prior.module_label,
+                previous_updated_at: prior.updated_at,
+              });
+            }
           }
         }
 
@@ -942,10 +982,13 @@ export function registerFileTools(server: McpServer) {
           files_api_available: filesApiAvailable,
           added_count: added.length,
           updated_count: updated.length,
-          removed_count: removed.length,
+          removed_count: filesApiAvailable ? removed.length : null,
           added,
           updated,
-          removed,
+          removed: filesApiAvailable ? removed : null,
+          ...(filesApiAvailable
+            ? {}
+            : { note: 'Files API unavailable; removed-file detection skipped — would produce false positives on the module-fallback path.' }),
         });
       } catch (error) {
         return formatError('diffing course files', error);
@@ -980,7 +1023,7 @@ export function registerFileTools(server: McpServer) {
         const defaultRoot = path.join(os.homedir(), 'Canvas', String(course_id));
         const expanded = (dest_root ?? defaultRoot).replace(/^~/, os.homedir());
         const resolvedRoot = path.resolve(expanded);
-        if (!resolvedRoot.startsWith(os.homedir())) {
+        if (!isPathInside(resolvedRoot, os.homedir())) {
           throw new Error('dest_root must be under home directory');
         }
 
@@ -997,13 +1040,17 @@ export function registerFileTools(server: McpServer) {
           filesApiAvailable = false;
         }
 
-        const fileIdToModule = new Map<number, string>();
+        // Carry the module-item title so we can extension-filter on the
+        // fallback path. Files-API metadata wins when both are available.
+        const fileIdToModuleInfo = new Map<number, { label: string; title: string }>();
         const modules = await client.listModules(course_id, { include: ['items'] });
         for (const mod of modules) {
           for (const item of mod.items ?? []) {
             if (item.type !== 'File') continue;
             const fid = item.content_id ?? item.id;
-            if (!fileIdToModule.has(fid)) fileIdToModule.set(fid, mod.name);
+            if (!fileIdToModuleInfo.has(fid)) {
+              fileIdToModuleInfo.set(fid, { label: mod.name, title: item.title });
+            }
           }
         }
 
@@ -1027,24 +1074,23 @@ export function registerFileTools(server: McpServer) {
               name: f.display_name || f.filename,
               size: f.size,
               updated_at: f.updated_at ?? null,
-              module_label: fileIdToModule.get(f.id) ?? 'unsorted',
+              module_label: fileIdToModuleInfo.get(f.id)?.label ?? 'unsorted',
             });
           }
         } else {
-          // Module-fallback: we have ids + titles only.
-          for (const [fid, modLabel] of fileIdToModule) {
-            const ext = path.extname('').toLowerCase().replace(/^\./, '');
-            if (file_types && file_types.length > 0 && !file_types.includes(ext as typeof file_types[number])) {
-              // Without a filename we can't filter by extension here; skip
-              // when explicit filter set.
-              continue;
+          // Module-fallback: extract extension from the module item title
+          // so file_types filtering still works without the Files API.
+          for (const [fid, info] of fileIdToModuleInfo) {
+            if (file_types && file_types.length > 0) {
+              const ext = path.extname(info.title).toLowerCase().replace(/^\./, '');
+              if (!file_types.includes(ext as typeof file_types[number])) continue;
             }
             candidates.push({
               file_id: fid,
-              name: `file:${fid}`,
+              name: info.title || `file:${fid}`,
               size: 0,
               updated_at: null,
-              module_label: modLabel,
+              module_label: info.label,
             });
           }
         }
@@ -1140,7 +1186,7 @@ export function registerFileTools(server: McpServer) {
           const moduleFolder = sanitizeFolder(p.module_label);
           const targetSubdir = path.join(resolvedRoot, moduleFolder);
           const resolvedSubdir = path.resolve(targetSubdir);
-          if (!resolvedSubdir.startsWith(resolvedRoot)) {
+          if (!isPathInside(resolvedSubdir, resolvedRoot)) {
             return {
               result: {
                 file_id: p.file_id,
@@ -1152,10 +1198,22 @@ export function registerFileTools(server: McpServer) {
             };
           }
           await mkdir(resolvedSubdir, { recursive: true });
-          const safeName = path.basename(fileMeta.filename).replace(/[/\\]/g, '_');
-          const localPath = path.join(resolvedSubdir, safeName);
+          const baseSafeName = safeCanvasFilename(fileMeta.filename, p.file_id);
+          // Collision-resolve: same name → append file_id. Sync should
+          // overwrite when the same file_id maps to the same prior path
+          // (handled by `priorFiles[fid].local_path` taking precedence
+          // upstream), but guard the fresh-write case anyway.
+          let safeName = baseSafeName;
+          let localPath = path.join(resolvedSubdir, safeName);
+          const prior = priorFiles[String(p.file_id)];
+          if (fs.existsSync(localPath) && prior?.local_path !== path.resolve(localPath)) {
+            const ext = path.extname(baseSafeName);
+            const stem = ext ? baseSafeName.slice(0, -ext.length) : baseSafeName;
+            safeName = `${stem}_${p.file_id}${ext}`;
+            localPath = path.join(resolvedSubdir, safeName);
+          }
           const resolvedLocal = path.resolve(localPath);
-          if (!resolvedLocal.startsWith(resolvedSubdir)) {
+          if (!isPathInside(resolvedLocal, resolvedSubdir)) {
             return {
               result: {
                 file_id: p.file_id,
@@ -1220,8 +1278,22 @@ export function registerFileTools(server: McpServer) {
         if (prune) {
           for (const target of pruneTargets) {
             try {
-              if (fs.existsSync(target.local_path)) {
-                await unlink(target.local_path);
+              // Defense-in-depth: the local_path comes from the JSON state
+              // file which is mode 0600 — but if a malicious process or
+              // poisoned prior call wrote a path outside dest_root, refuse
+              // to unlink. Prevents arbitrary-file deletion via state
+              // tampering.
+              const resolvedPrune = path.resolve(target.local_path);
+              if (!isPathInside(resolvedPrune, resolvedRoot)) {
+                failures.push({
+                  file_id: target.file_id,
+                  name: target.filename,
+                  error: `prune target outside dest_root — refusing to delete ${target.local_path}`,
+                });
+                continue;
+              }
+              if (fs.existsSync(resolvedPrune)) {
+                await unlink(resolvedPrune);
               }
               delete newFiles[String(target.file_id)];
               pruned.push(target);

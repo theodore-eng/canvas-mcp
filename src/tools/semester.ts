@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getCanvasClient } from '../canvas-client.js';
-import { formatError, formatSuccess, runWithConcurrency } from '../utils.js';
+import { formatError, formatSuccess, runWithConcurrency, isPathInside } from '../utils.js';
 import { setPreference } from '../services/preferences.js';
 import { mkdir } from 'fs/promises';
 import { join } from 'path';
@@ -53,7 +53,7 @@ export function registerSemesterTools(server: McpServer) {
           ? base_path.replace(/^~/, os.homedir())
           : join(os.homedir(), 'Canvas');
         const absoluteBasePath = join(resolvedBasePath); // resolve relative paths
-        if (!absoluteBasePath.startsWith(os.homedir())) {
+        if (!isPathInside(absoluteBasePath, os.homedir())) {
           throw new Error('Path must be under home directory');
         }
 
@@ -114,10 +114,10 @@ export function registerSemesterTools(server: McpServer) {
           const safeName = folderName.length > 0 ? folderName : `COURSE-${course.id}`;
           const courseFolderPath = join(resolvedBasePath, safeName);
           // Path-confinement check: resolved path must remain inside the base.
-          const { resolve: resolvePath, sep } = await import('path');
+          const { resolve: resolvePath } = await import('path');
           const resolvedCoursePath = resolvePath(courseFolderPath);
           const resolvedBase = resolvePath(resolvedBasePath);
-          if (!(resolvedCoursePath === resolvedBase || resolvedCoursePath.startsWith(resolvedBase + sep))) {
+          if (!isPathInside(resolvedCoursePath, resolvedBase)) {
             folderErrors.push(
               `Refusing to create course folder outside base path: ${courseFolderPath}`,
             );

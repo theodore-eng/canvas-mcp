@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getCanvasClient } from '../canvas-client.js';
-import { formatError, formatSuccess, formatFileSize, stripHtmlTags, extractLinkedFiles, runWithConcurrency } from '../utils.js';
+import { formatError, formatSuccess, formatFileSize, stripHtmlTags, extractLinkedFiles, runWithConcurrency, isPathInside, safeCanvasFilename } from '../utils.js';
 
 export function registerAssignmentTools(server: McpServer) {
   const client = getCanvasClient();
@@ -171,7 +171,7 @@ export function registerAssignmentTools(server: McpServer) {
         // Validate target_path is under $HOME
         const expandedPath = target_path.replace(/^~/, os.homedir());
         const resolvedTarget = path.resolve(expandedPath);
-        if (!resolvedTarget.startsWith(os.homedir())) {
+        if (!isPathInside(resolvedTarget, os.homedir())) {
           throw new Error('Path must be under home directory');
         }
 
@@ -185,10 +185,10 @@ export function registerAssignmentTools(server: McpServer) {
             const arrayBuffer = await client.downloadFile(file.url);
             const buffer = Buffer.from(arrayBuffer);
 
-            const safeName = path.basename(file.filename).replace(/[/\\]/g, '_');
+            const safeName = safeCanvasFilename(file.filename, file.id);
             const localPath = path.join(resolvedTarget, safeName);
             const resolvedLocal = path.resolve(localPath);
-            if (!resolvedLocal.startsWith(resolvedTarget)) {
+            if (!isPathInside(resolvedLocal, resolvedTarget)) {
               throw new Error('Filename would write outside target directory');
             }
 

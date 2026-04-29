@@ -81,9 +81,11 @@ export function loadSyncState(): SyncState {
 }
 
 /**
- * Atomic write: serialize, write to a tmpfile, fsync-equivalent flush via
- * close, then rename over the target. On POSIX, rename is atomic when both
- * paths are on the same filesystem (which they are — both inside DATA_DIR).
+ * Atomic write: serialize, write to a tmpfile, fsync to flush kernel page
+ * cache to disk, then rename over the target. On POSIX, rename is atomic
+ * when both paths are on the same filesystem (which they are — both inside
+ * DATA_DIR). The fsync is essential: without it, a power failure between
+ * the rename and the eventual cache flush can land an empty target file.
  */
 export function saveSyncState(state: SyncState): void {
   ensureDataDir();
@@ -91,7 +93,19 @@ export function saveSyncState(state: SyncState): void {
   const file = syncStateFile();
   const json = JSON.stringify(state, null, 2);
   const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(tmp, json, { mode: 0o600 });
+  // Open with O_CREAT|O_WRONLY|O_TRUNC, write all bytes, fsync, close, rename.
+  const fd = fs.openSync(tmp, 'w', 0o600);
+  try {
+    fs.writeFileSync(fd, json);
+    try {
+      fs.fsyncSync(fd);
+    } catch {
+      // fsync can fail on virtual filesystems (e.g. some test envs); the
+      // rename below is still atomic on the same FS, so swallow.
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
   fs.renameSync(tmp, file);
 }
 

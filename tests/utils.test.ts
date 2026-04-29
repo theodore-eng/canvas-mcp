@@ -8,6 +8,8 @@ import {
   sortByDueDate,
   runWithConcurrency,
   compileUserPattern,
+  isPathInside,
+  safeCanvasFilename,
   MAX_FILE_SIZE,
   DEFAULT_MAX_TEXT_LENGTH,
 } from '../src/utils.js';
@@ -474,5 +476,98 @@ describe('compileUserPattern', () => {
     const re = compileUserPattern('/abc/m', 'test');
     expect(re.flags).toContain('m');
     expect(re.flags).toContain('i');
+  });
+
+  it('rejects empty / whitespace-only input', () => {
+    expect(() => compileUserPattern('', 'q')).toThrow(/empty or whitespace/);
+    expect(() => compileUserPattern('   ', 'q')).toThrow(/empty or whitespace/);
+    expect(() => compileUserPattern('\t\n', 'q')).toThrow(/empty or whitespace/);
+  });
+
+  it('blocks textbook ReDoS shapes — nested unbounded quantifiers', () => {
+    // (a+)+ is the canonical example; (a*)* is the same shape.
+    expect(() => compileUserPattern('/(a+)+$/', 'q')).toThrow(/catastrophic|Pattern rejected/);
+    expect(() => compileUserPattern('/(a*)*$/', 'q')).toThrow(/catastrophic|Pattern rejected/);
+    // Plain text "(a+)+" is auto-escaped → safe, must NOT throw.
+    expect(() => compileUserPattern('(a+)+', 'q')).not.toThrow();
+  });
+
+  it('blocks alternation under unbounded quantifier ((a|b)*)', () => {
+    expect(() => compileUserPattern('/(a|b)*c/', 'q')).toThrow(/catastrophic|Pattern rejected/);
+  });
+});
+
+// ==================== isPathInside ====================
+
+describe('isPathInside', () => {
+  it('returns true when child equals parent', () => {
+    expect(isPathInside('/Users/theo', '/Users/theo')).toBe(true);
+  });
+
+  it('returns true for true descendants', () => {
+    expect(isPathInside('/Users/theo/Canvas/file.pdf', '/Users/theo')).toBe(true);
+    expect(isPathInside('/Users/theo/a/b/c', '/Users/theo/a')).toBe(true);
+  });
+
+  it('rejects sibling-prefix attack', () => {
+    // The classic bug: /Users/theo startsWith-matches /Users/theoadmin.
+    expect(isPathInside('/Users/theoadmin/exfil', '/Users/theo')).toBe(false);
+    expect(isPathInside('/Users/theoadmin', '/Users/theo')).toBe(false);
+  });
+
+  it('rejects unrelated paths', () => {
+    expect(isPathInside('/etc/passwd', '/Users/theo')).toBe(false);
+    expect(isPathInside('/var/tmp', '/Users/theo')).toBe(false);
+  });
+
+  it('handles trailing-separator parent correctly', () => {
+    expect(isPathInside('/Users/theo/x', '/Users/theo/')).toBe(true);
+    expect(isPathInside('/Users/theoadmin/x', '/Users/theo/')).toBe(false);
+  });
+
+  it('returns false on empty inputs', () => {
+    expect(isPathInside('', '/Users/theo')).toBe(false);
+    expect(isPathInside('/Users/theo', '')).toBe(false);
+  });
+});
+
+// ==================== safeCanvasFilename ====================
+
+describe('safeCanvasFilename', () => {
+  it('strips POSIX path separators and replaces Windows separators with _', () => {
+    expect(safeCanvasFilename('a/b/c.pdf', 1)).toBe('c.pdf');
+    // path.basename on POSIX does not split on backslash, but our replace
+    // converts each `\` to `_` so the result is still a flat filename
+    // (no real path separators) — the key safety property.
+    const out = safeCanvasFilename('..\\..\\evil.exe', 1);
+    expect(out.includes('/')).toBe(false);
+    expect(out.includes('\\')).toBe(false);
+    expect(out.endsWith('evil.exe')).toBe(true);
+  });
+
+  it('drops null bytes', () => {
+    expect(safeCanvasFilename('safe\x00.pdf', 1)).toBe('safe.pdf');
+  });
+
+  it('falls back to file_<id> for empty results', () => {
+    expect(safeCanvasFilename('', 42)).toBe('file_42');
+    expect(safeCanvasFilename('/', 42)).toBe('file_42');
+  });
+
+  it('preserves names under the cap unchanged', () => {
+    expect(safeCanvasFilename('lecture-week-5.pdf', 1)).toBe('lecture-week-5.pdf');
+  });
+
+  it('caps total length at 200 chars while preserving the extension', () => {
+    const long = 'a'.repeat(300) + '.pdf';
+    const out = safeCanvasFilename(long, 1);
+    expect(out.length).toBeLessThanOrEqual(200);
+    expect(out.endsWith('.pdf')).toBe(true);
+  });
+
+  it('drops a hostile 100-char extension to prevent overflow', () => {
+    const huge = 'stem.' + 'x'.repeat(100);
+    const out = safeCanvasFilename(huge, 1);
+    expect(out.length).toBeLessThanOrEqual(200);
   });
 });
