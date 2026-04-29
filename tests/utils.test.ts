@@ -7,6 +7,7 @@ import {
   formatPlannerItem,
   sortByDueDate,
   runWithConcurrency,
+  compileUserPattern,
   MAX_FILE_SIZE,
   DEFAULT_MAX_TEXT_LENGTH,
 } from '../src/utils.js';
@@ -417,5 +418,61 @@ describe('constants', () => {
 
   it('DEFAULT_MAX_TEXT_LENGTH is 50000', () => {
     expect(DEFAULT_MAX_TEXT_LENGTH).toBe(50000);
+  });
+});
+
+// ==================== compileUserPattern ====================
+
+describe('compileUserPattern', () => {
+  it('treats plain text as case-insensitive substring (auto-escaped)', () => {
+    const re = compileUserPattern('week 5', 'test');
+    expect(re.flags).toContain('i');
+    expect(re.test('Week 5 readings')).toBe(true);
+    expect(re.test('week 5 SLIDES')).toBe(true);
+    expect(re.test('week 6')).toBe(false);
+  });
+
+  it('escapes regex metacharacters in plain text input', () => {
+    // "." should match a literal dot, not any char
+    const re = compileUserPattern('a.b', 'test');
+    expect(re.test('a.b')).toBe(true);
+    expect(re.test('axb')).toBe(false);
+  });
+
+  it('parses /regex/flags delimiter syntax', () => {
+    const re = compileUserPattern('/^Week (4|5)/', 'test');
+    expect(re.flags).toContain('i');
+    expect(re.test('Week 4 lecture')).toBe(true);
+    expect(re.test('week 5 — readings')).toBe(true);
+    expect(re.test('Pre-Week 6')).toBe(false);
+  });
+
+  it('always forces case-insensitive even when user omits i flag', () => {
+    const re = compileUserPattern('/cap rate/', 'test');
+    expect(re.flags).toContain('i');
+    expect(re.test('CAP RATE')).toBe(true);
+  });
+
+  it('honors defaultGlobal=true for multi-match scans', () => {
+    const re = compileUserPattern('foo', 'test', true);
+    expect(re.global).toBe(true);
+    expect(re.flags).toContain('i');
+  });
+
+  it('does not force g when defaultGlobal=false', () => {
+    const re = compileUserPattern('foo', 'test', false);
+    expect(re.global).toBe(false);
+  });
+
+  it('throws a labeled friendly error on invalid regex syntax', () => {
+    expect(() => compileUserPattern('/[/', 'query')).toThrow(/Invalid query pattern/);
+    // Plain-text input with regex-meta chars should NOT throw — they're escaped.
+    expect(() => compileUserPattern('[unclosed', 'query')).not.toThrow();
+  });
+
+  it('preserves user-supplied flags besides i and g', () => {
+    const re = compileUserPattern('/abc/m', 'test');
+    expect(re.flags).toContain('m');
+    expect(re.flags).toContain('i');
   });
 });

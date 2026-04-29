@@ -527,6 +527,32 @@ export const MAX_FILE_SIZE = 25 * 1024 * 1024;
 export const DEFAULT_MAX_TEXT_LENGTH = 50000;
 
 /**
+ * Compile a user-supplied pattern string into a RegExp.
+ * Accepts plain text (auto-escaped, case-insensitive) or `/pattern/flags`
+ * delimiter syntax. Always forces `i` so search is case-insensitive by
+ * default; optionally forces `g` for multi-match scans.
+ *
+ * Throws a typed error with the pattern label so callers can surface a
+ * friendly message to the LLM instead of a raw RegExp parse error.
+ */
+export function compileUserPattern(input: string, label: string, defaultGlobal = false): RegExp {
+  try {
+    const m = input.match(/^\/(.+)\/([gimuy]*)$/);
+    if (m) {
+      let flags = m[2];
+      if (!flags.includes('i')) flags += 'i';
+      if (defaultGlobal && !flags.includes('g')) flags += 'g';
+      return new RegExp(m[1], flags);
+    }
+    const escaped = input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(escaped, defaultGlobal ? 'gi' : 'i');
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new Error(`Invalid ${label} pattern (${reason}). Use plain text or /regex/flags syntax.`);
+  }
+}
+
+/**
  * Run async tasks with a concurrency limit to avoid overwhelming the Canvas API.
  * Returns results in the same order as the input tasks.
  */

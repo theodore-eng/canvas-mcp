@@ -10,6 +10,7 @@ import {
   formatFileSize,
   extractTextFromFile,
   runWithConcurrency,
+  compileUserPattern,
   MAX_FILE_SIZE,
   DEFAULT_MAX_TEXT_LENGTH,
 } from '../utils.js';
@@ -424,13 +425,9 @@ export function registerFileTools(server: McpServer) {
         const sanitizeFolder = (s: string): string =>
           s.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'untitled';
 
-        let modulePatternRegex: RegExp | null = null;
-        if (module_pattern) {
-          const m = module_pattern.match(/^\/(.+)\/([gimuy]*)$/);
-          modulePatternRegex = m
-            ? new RegExp(m[1], m[2].includes('i') ? m[2] : m[2] + 'i')
-            : new RegExp(module_pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-        }
+        const modulePatternRegex: RegExp | null = module_pattern
+          ? compileUserPattern(module_pattern, 'module_pattern')
+          : null;
 
         // Build candidate set: { file_id, name, content_type, size, updated_at, module_label }
         type Candidate = {
@@ -443,43 +440,74 @@ export function registerFileTools(server: McpServer) {
         };
         const candidates: Candidate[] = [];
 
-        // Always fetch files (canonical list); also fetch modules if a pattern is provided.
-        const files = await client.listCourseFiles(course_id);
-        let fileIdToModule = new Map<number, string>();
+        // Try Files API first; on failure (some courses restrict it), fall
+        // back to scanning modules for File items so the tool still works
+        // for restricted courses.
+        let files: Awaited<ReturnType<typeof client.listCourseFiles>> = [];
+        let filesApiAvailable = true;
+        try {
+          files = await client.listCourseFiles(course_id);
+        } catch {
+          filesApiAvailable = false;
+        }
 
-        if (modulePatternRegex) {
+        const fileIdToModule = new Map<number, string>();
+        // Always fetch modules when needed (pattern filter, OR Files API down)
+        const needModules = modulePatternRegex !== null || !filesApiAvailable;
+        if (needModules) {
           const modules = await client.listModules(course_id, { include: ['items'] });
           for (const mod of modules) {
-            if (!modulePatternRegex.test(mod.name)) continue;
+            const matchesModulePattern = !modulePatternRegex || modulePatternRegex.test(mod.name);
             for (const item of mod.items ?? []) {
               if (item.type !== 'File') continue;
               const fid = item.content_id ?? item.id;
-              if (!fileIdToModule.has(fid)) fileIdToModule.set(fid, mod.name);
+              // Track module label for any file we've seen, regardless of
+              // pattern (so per-folder layout works on the fallback path).
+              if (!fileIdToModule.has(fid) && matchesModulePattern) {
+                fileIdToModule.set(fid, mod.name);
+              }
+              // If Files API is unavailable, synthesize Candidates from
+              // module items (we only have id + title + module_name; size
+              // and content_type require getFile() per item, which is
+              // expensive — defer until download or dry_run preview).
+              if (!filesApiAvailable && matchesModulePattern) {
+                const ext = path.extname(item.title).toLowerCase().replace(/^\./, '');
+                if (file_types && file_types.length > 0 && !file_types.includes(ext as typeof file_types[number])) continue;
+                candidates.push({
+                  file_id: fid,
+                  name: item.title,
+                  size: 0, // unknown until getFile()
+                  updated_at: undefined,
+                  module_label: mod.name,
+                });
+              }
             }
           }
         }
 
-        for (const f of files) {
-          // If module_pattern was provided, drop files outside matching modules.
-          if (modulePatternRegex && !fileIdToModule.has(f.id)) continue;
+        if (filesApiAvailable) {
+          for (const f of files) {
+            // If module_pattern was provided, drop files outside matching modules.
+            if (modulePatternRegex && !fileIdToModule.has(f.id)) continue;
 
-          // Filter by extension
-          if (file_types && file_types.length > 0) {
-            const ext = path.extname(f.filename).toLowerCase().replace(/^\./, '');
-            if (!file_types.includes(ext as typeof file_types[number])) continue;
+            // Filter by extension
+            if (file_types && file_types.length > 0) {
+              const ext = path.extname(f.filename).toLowerCase().replace(/^\./, '');
+              if (!file_types.includes(ext as typeof file_types[number])) continue;
+            }
+
+            // Filter by updated_at
+            if (since && f.updated_at && new Date(f.updated_at) <= new Date(since)) continue;
+
+            candidates.push({
+              file_id: f.id,
+              name: f.display_name || f.filename,
+              content_type: f['content-type'],
+              size: f.size,
+              updated_at: f.updated_at,
+              module_label: fileIdToModule.get(f.id) ?? 'unsorted',
+            });
           }
-
-          // Filter by updated_at
-          if (since && f.updated_at && new Date(f.updated_at) <= new Date(since)) continue;
-
-          candidates.push({
-            file_id: f.id,
-            name: f.display_name || f.filename,
-            content_type: f['content-type'],
-            size: f.size,
-            updated_at: f.updated_at,
-            module_label: fileIdToModule.get(f.id) ?? 'unsorted',
-          });
         }
 
         // Apply max_files cap; surface truncation in result
@@ -517,8 +545,8 @@ export function registerFileTools(server: McpServer) {
 
         // Real download: concurrency 3 (matches existing client patterns)
         const tasks = selected.map((c) => async (): Promise<Result> => {
-          // Per-file size precheck — refuse files exceeding MAX_FILE_SIZE
-          // before touching the network or buffering bytes.
+          // Per-file size precheck (when known from Files API) — refuse
+          // files exceeding MAX_FILE_SIZE before touching the network.
           if (c.size > MAX_FILE_SIZE) {
             return {
               file_id: c.file_id,
@@ -531,6 +559,18 @@ export function registerFileTools(server: McpServer) {
           }
 
           const fileMeta = await client.getFile(c.file_id);
+          // Fallback-path candidates carried size:0 — re-check after we
+          // have authoritative metadata from getFile().
+          if (fileMeta.size > MAX_FILE_SIZE) {
+            return {
+              file_id: c.file_id,
+              name: c.name,
+              size_bytes: fileMeta.size,
+              size_human: formatFileSize(fileMeta.size),
+              module_label: c.module_label,
+              skipped_reason: `File exceeds MAX_FILE_SIZE (${formatFileSize(MAX_FILE_SIZE)}); use download_file with explicit confirmation if needed.`,
+            };
+          }
           const moduleFolder = sanitizeFolder(c.module_label);
           const targetSubdir = path.join(resolvedTarget, moduleFolder);
           const resolvedSubdir = path.resolve(targetSubdir);
@@ -563,11 +603,14 @@ export function registerFileTools(server: McpServer) {
           const arrayBuffer = await client.downloadFile(fileMeta.url);
           await writeFile(resolvedLocal, Buffer.from(arrayBuffer));
 
+          // Use authoritative size from fileMeta — for fallback candidates
+          // c.size was 0 (Files API was unavailable when listing).
+          const trueSize = fileMeta.size || c.size;
           return {
             file_id: c.file_id,
             name: c.name,
-            size_bytes: c.size,
-            size_human: formatFileSize(c.size),
+            size_bytes: trueSize,
+            size_human: formatFileSize(trueSize),
             local_path: resolvedLocal,
             module_label: c.module_label,
           };
@@ -638,48 +681,69 @@ export function registerFileTools(server: McpServer) {
           ? file_types
           : ['pdf', 'docx', 'pptx'] as const;
 
-        // Compile query
-        const regexMatch = query.match(/^\/(.+)\/([gimuy]*)$/);
-        const queryRegex = regexMatch
-          ? new RegExp(regexMatch[1], regexMatch[2].includes('i') ? regexMatch[2] : regexMatch[2] + 'i')
-          : new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+        const queryRegex = compileUserPattern(query, 'query', true);
+        const modulePatternRegex: RegExp | null = module_pattern
+          ? compileUserPattern(module_pattern, 'module_pattern', false)
+          : null;
 
-        let modulePatternRegex: RegExp | null = null;
-        if (module_pattern) {
-          const m = module_pattern.match(/^\/(.+)\/([gimuy]*)$/);
-          modulePatternRegex = m
-            ? new RegExp(m[1], m[2].includes('i') ? m[2] : m[2] + 'i')
-            : new RegExp(module_pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-        }
-
-        const files = await client.listCourseFiles(course_id);
-        let fileIdToModule = new Map<number, string>();
-        if (modulePatternRegex) {
-          const modules = await client.listModules(course_id, { include: ['items'] });
-          for (const mod of modules) {
-            if (!modulePatternRegex.test(mod.name)) continue;
-            for (const item of mod.items ?? []) {
-              if (item.type !== 'File') continue;
-              const fid = item.content_id ?? item.id;
-              if (!fileIdToModule.has(fid)) fileIdToModule.set(fid, mod.name);
-            }
-          }
+        // Try Files API first; fall back to module-scanned File items if
+        // the course restricts the Files API.
+        let files: Awaited<ReturnType<typeof client.listCourseFiles>> = [];
+        let filesApiAvailable = true;
+        try {
+          files = await client.listCourseFiles(course_id);
+        } catch {
+          filesApiAvailable = false;
         }
 
         type Candidate = { file_id: number; name: string; size: number; content_type?: string; module_label: string };
         const candidates: Candidate[] = [];
-        for (const f of files) {
-          if (modulePatternRegex && !fileIdToModule.has(f.id)) continue;
-          const ext = path.extname(f.filename).toLowerCase().replace(/^\./, '');
-          if (!(allowedExt as readonly string[]).includes(ext)) continue;
-          if (f.size > MAX_FILE_SIZE) continue;
-          candidates.push({
-            file_id: f.id,
-            name: f.display_name || f.filename,
-            size: f.size,
-            content_type: f['content-type'],
-            module_label: fileIdToModule.get(f.id) ?? 'unsorted',
-          });
+        const fileIdToModule = new Map<number, string>();
+        const seenIds = new Set<number>();
+
+        const needModules = modulePatternRegex !== null || !filesApiAvailable;
+        if (needModules) {
+          const modules = await client.listModules(course_id, { include: ['items'] });
+          for (const mod of modules) {
+            const matchesModulePattern = !modulePatternRegex || modulePatternRegex.test(mod.name);
+            for (const item of mod.items ?? []) {
+              if (item.type !== 'File') continue;
+              const fid = item.content_id ?? item.id;
+              if (matchesModulePattern && !fileIdToModule.has(fid)) {
+                fileIdToModule.set(fid, mod.name);
+              }
+              // Synthesize candidates from modules when Files API is down.
+              // Size is unknown until getFile() — we filter by extension up
+              // front and defer the size cap to the per-file getFile() call.
+              if (!filesApiAvailable && matchesModulePattern && !seenIds.has(fid)) {
+                const ext = path.extname(item.title).toLowerCase().replace(/^\./, '');
+                if (!(allowedExt as readonly string[]).includes(ext)) continue;
+                seenIds.add(fid);
+                candidates.push({
+                  file_id: fid,
+                  name: item.title,
+                  size: 0,
+                  module_label: mod.name,
+                });
+              }
+            }
+          }
+        }
+
+        if (filesApiAvailable) {
+          for (const f of files) {
+            if (modulePatternRegex && !fileIdToModule.has(f.id)) continue;
+            const ext = path.extname(f.filename).toLowerCase().replace(/^\./, '');
+            if (!(allowedExt as readonly string[]).includes(ext)) continue;
+            if (f.size > MAX_FILE_SIZE) continue;
+            candidates.push({
+              file_id: f.id,
+              name: f.display_name || f.filename,
+              size: f.size,
+              content_type: f['content-type'],
+              module_label: fileIdToModule.get(f.id) ?? 'unsorted',
+            });
+          }
         }
 
         const truncated = candidates.length > max_files;
@@ -693,9 +757,25 @@ export function registerFileTools(server: McpServer) {
           error?: string;
         };
 
+        // Snapshot regex source/flags to construct a fresh RegExp per task —
+        // sharing one RegExp across concurrent tasks is a lastIndex race.
+        const queryRegexSource = queryRegex.source;
+        const queryRegexFlags = queryRegex.flags;
+
         const tasks = selected.map((c) => async (): Promise<FileHit> => {
           try {
             const fileMeta = await client.getFile(c.file_id);
+            // Fallback-path candidates have size:0 — verify against the cap
+            // after fetching real metadata.
+            if (fileMeta.size > MAX_FILE_SIZE) {
+              return {
+                file_id: c.file_id,
+                name: c.name,
+                module_label: c.module_label,
+                hits: [],
+                error: `File exceeds MAX_FILE_SIZE (${formatFileSize(MAX_FILE_SIZE)}); skipped`,
+              };
+            }
             const buf = Buffer.from(await client.downloadFile(fileMeta.url));
             const extracted = await extractTextFromFile(
               buf,
@@ -706,19 +786,16 @@ export function registerFileTools(server: McpServer) {
               return { file_id: c.file_id, name: c.name, module_label: c.module_label, hits: [] };
             }
             const text = extracted.text;
-            // Reset lastIndex if the user-passed regex carries `g`.
-            queryRegex.lastIndex = 0;
+            const localRegex = new RegExp(queryRegexSource, queryRegexFlags);
             const hits: Array<{ snippet: string; offset: number }> = [];
             let match: RegExpExecArray | null;
-            while ((match = queryRegex.exec(text)) !== null && hits.length < max_hits_per_file) {
+            while ((match = localRegex.exec(text)) !== null && hits.length < max_hits_per_file) {
               const start = Math.max(0, match.index - Math.floor(snippet_chars / 2));
               const end = Math.min(text.length, match.index + match[0].length + Math.floor(snippet_chars / 2));
               const raw = text.slice(start, end).replace(/\s+/g, ' ').trim();
               hits.push({ snippet: raw, offset: match.index });
-              // Avoid infinite loop on zero-width matches
-              if (match.index === queryRegex.lastIndex) queryRegex.lastIndex++;
-              // If the regex isn't global, exec returns same result — break.
-              if (!queryRegex.global) break;
+              // Avoid infinite loop on zero-width matches.
+              if (match.index === localRegex.lastIndex) localRegex.lastIndex++;
             }
             return { file_id: c.file_id, name: c.name, module_label: c.module_label, hits };
           } catch (e) {
