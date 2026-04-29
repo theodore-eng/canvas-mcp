@@ -9,6 +9,7 @@ import {
   formatSuccess,
   formatFileSize,
   extractTextFromFile,
+  runWithConcurrency,
   MAX_FILE_SIZE,
   DEFAULT_MAX_TEXT_LENGTH,
 } from '../utils.js';
@@ -383,6 +384,375 @@ export function registerFileTools(server: McpServer) {
         });
       } catch (error) {
         return formatError('downloading file', error);
+      }
+    }
+  );
+
+  // ==================== download_course_files ====================
+  // Bulk download by module pattern, file type, and/or updated-since filter.
+  // Honors path-confinement and per-file size caps. Returns a manifest the
+  // LLM can chain (every entry carries file_id + local_path).
+
+  server.tool(
+    'download_course_files',
+    'Bulk download files from a course filtered by module name, file type, and/or updated-since timestamp. Saves into per-module subfolders under the target directory. Use dry_run=true to preview what WOULD be downloaded without writing anything.',
+    {
+      course_id: z.number().int().positive().describe('The Canvas course ID'),
+      target_path: z.string().describe('Local base directory. Files land in <target>/<sanitized-module>/<filename>. Must be under your home directory.'),
+      module_pattern: z.string().max(200).optional()
+        .describe('Case-insensitive substring or /regex/ to match module names (e.g. "week 5", "/^Week (4|5)/"). Files outside matching modules are skipped.'),
+      file_types: z.array(z.enum(['pdf', 'docx', 'pptx', 'xlsx', 'txt', 'md', 'csv', 'html'])).max(8).optional()
+        .describe('Limit to these file extensions. Omit to allow all.'),
+      since: z.string().datetime().optional()
+        .describe('ISO 8601 timestamp; only download files with updated_at > since.'),
+      max_files: z.number().int().min(1).max(200).optional().default(50)
+        .describe('Hard cap on files to download in one call (default 50, max 200).'),
+      dry_run: z.boolean().optional().default(false)
+        .describe('When true, list what would be downloaded but do not write.'),
+    },
+    async ({ course_id, target_path, module_pattern, file_types, since, max_files, dry_run }) => {
+      try {
+        // Path resolution + confinement
+        const expandedTarget = target_path.replace(/^~/, os.homedir());
+        const resolvedTarget = path.resolve(expandedTarget);
+        if (!resolvedTarget.startsWith(os.homedir())) {
+          throw new Error('target_path must be under home directory');
+        }
+
+        // Build module name → matching items index (only if module_pattern set)
+        // Otherwise, we list course files directly and use file metadata.
+        const sanitizeFolder = (s: string): string =>
+          s.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'untitled';
+
+        let modulePatternRegex: RegExp | null = null;
+        if (module_pattern) {
+          const m = module_pattern.match(/^\/(.+)\/([gimuy]*)$/);
+          modulePatternRegex = m
+            ? new RegExp(m[1], m[2].includes('i') ? m[2] : m[2] + 'i')
+            : new RegExp(module_pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+        }
+
+        // Build candidate set: { file_id, name, content_type, size, updated_at, module_label }
+        type Candidate = {
+          file_id: number;
+          name: string;
+          content_type?: string;
+          size: number;
+          updated_at: string | undefined;
+          module_label: string;
+        };
+        const candidates: Candidate[] = [];
+
+        // Always fetch files (canonical list); also fetch modules if a pattern is provided.
+        const files = await client.listCourseFiles(course_id);
+        let fileIdToModule = new Map<number, string>();
+
+        if (modulePatternRegex) {
+          const modules = await client.listModules(course_id, { include: ['items'] });
+          for (const mod of modules) {
+            if (!modulePatternRegex.test(mod.name)) continue;
+            for (const item of mod.items ?? []) {
+              if (item.type !== 'File') continue;
+              const fid = item.content_id ?? item.id;
+              if (!fileIdToModule.has(fid)) fileIdToModule.set(fid, mod.name);
+            }
+          }
+        }
+
+        for (const f of files) {
+          // If module_pattern was provided, drop files outside matching modules.
+          if (modulePatternRegex && !fileIdToModule.has(f.id)) continue;
+
+          // Filter by extension
+          if (file_types && file_types.length > 0) {
+            const ext = path.extname(f.filename).toLowerCase().replace(/^\./, '');
+            if (!file_types.includes(ext as typeof file_types[number])) continue;
+          }
+
+          // Filter by updated_at
+          if (since && f.updated_at && new Date(f.updated_at) <= new Date(since)) continue;
+
+          candidates.push({
+            file_id: f.id,
+            name: f.display_name || f.filename,
+            content_type: f['content-type'],
+            size: f.size,
+            updated_at: f.updated_at,
+            module_label: fileIdToModule.get(f.id) ?? 'unsorted',
+          });
+        }
+
+        // Apply max_files cap; surface truncation in result
+        const truncated = candidates.length > max_files;
+        const selected = candidates.slice(0, max_files);
+
+        type Result = {
+          file_id: number;
+          name: string;
+          size_bytes: number;
+          size_human: string;
+          local_path?: string;
+          module_label: string;
+          skipped_reason?: string;
+        };
+
+        if (dry_run) {
+          const previewResults: Result[] = selected.map((c) => ({
+            file_id: c.file_id,
+            name: c.name,
+            size_bytes: c.size,
+            size_human: formatFileSize(c.size),
+            module_label: c.module_label,
+          }));
+          return formatSuccess({
+            course_id,
+            dry_run: true,
+            target_path: resolvedTarget,
+            total_candidates: candidates.length,
+            selected: selected.length,
+            truncated,
+            files: previewResults,
+          });
+        }
+
+        // Real download: concurrency 3 (matches existing client patterns)
+        const tasks = selected.map((c) => async (): Promise<Result> => {
+          // Per-file size precheck — refuse files exceeding MAX_FILE_SIZE
+          // before touching the network or buffering bytes.
+          if (c.size > MAX_FILE_SIZE) {
+            return {
+              file_id: c.file_id,
+              name: c.name,
+              size_bytes: c.size,
+              size_human: formatFileSize(c.size),
+              module_label: c.module_label,
+              skipped_reason: `File exceeds MAX_FILE_SIZE (${formatFileSize(MAX_FILE_SIZE)}); use download_file with explicit confirmation if needed.`,
+            };
+          }
+
+          const fileMeta = await client.getFile(c.file_id);
+          const moduleFolder = sanitizeFolder(c.module_label);
+          const targetSubdir = path.join(resolvedTarget, moduleFolder);
+          const resolvedSubdir = path.resolve(targetSubdir);
+          if (!resolvedSubdir.startsWith(resolvedTarget)) {
+            return {
+              file_id: c.file_id,
+              name: c.name,
+              size_bytes: c.size,
+              size_human: formatFileSize(c.size),
+              module_label: c.module_label,
+              skipped_reason: 'Path confinement check failed',
+            };
+          }
+          await mkdir(resolvedSubdir, { recursive: true });
+
+          const safeName = path.basename(fileMeta.filename).replace(/[/\\]/g, '_');
+          const localPath = path.join(resolvedSubdir, safeName);
+          const resolvedLocal = path.resolve(localPath);
+          if (!resolvedLocal.startsWith(resolvedSubdir)) {
+            return {
+              file_id: c.file_id,
+              name: c.name,
+              size_bytes: c.size,
+              size_human: formatFileSize(c.size),
+              module_label: c.module_label,
+              skipped_reason: 'Filename would write outside subdirectory',
+            };
+          }
+
+          const arrayBuffer = await client.downloadFile(fileMeta.url);
+          await writeFile(resolvedLocal, Buffer.from(arrayBuffer));
+
+          return {
+            file_id: c.file_id,
+            name: c.name,
+            size_bytes: c.size,
+            size_human: formatFileSize(c.size),
+            local_path: resolvedLocal,
+            module_label: c.module_label,
+          };
+        });
+
+        const settled = await runWithConcurrency(tasks, 3);
+        const results: Result[] = [];
+        const failures: Array<{ file_id: number; name: string; error: string }> = [];
+        settled.forEach((s, i) => {
+          if (s.status === 'fulfilled') {
+            results.push(s.value);
+          } else {
+            const c = selected[i];
+            failures.push({
+              file_id: c.file_id,
+              name: c.name,
+              error: s.reason instanceof Error ? s.reason.message : String(s.reason),
+            });
+          }
+        });
+
+        const downloaded = results.filter((r) => !r.skipped_reason && r.local_path);
+        const skipped = results.filter((r) => r.skipped_reason);
+
+        return formatSuccess({
+          course_id,
+          target_path: resolvedTarget,
+          total_candidates: candidates.length,
+          downloaded_count: downloaded.length,
+          skipped_count: skipped.length,
+          failed_count: failures.length,
+          truncated,
+          downloaded,
+          ...(skipped.length > 0 ? { skipped } : {}),
+          ...(failures.length > 0 ? { failures } : {}),
+        });
+      } catch (error) {
+        return formatError('bulk-downloading course files', error);
+      }
+    }
+  );
+
+  // ==================== search_course_files ====================
+  // Substring search across the text content of course files. Downloads each
+  // matching candidate into memory once (no disk write), extracts text via
+  // the same pipeline as read_file_content, then ripgreps.
+
+  server.tool(
+    'search_course_files',
+    'Search inside course files (PDF, DOCX, PPTX, XLSX, plain text) for a query string. Downloads each candidate file in memory, extracts text, and returns matching snippets. Useful for "where did the prof mention cap rate in lecture slides?" Capped to keep latency reasonable — narrow with file_types or module_pattern.',
+    {
+      course_id: z.number().int().positive().describe('The Canvas course ID'),
+      query: z.string().min(2).max(200).describe('Substring or /regex/ to search for. Case-insensitive by default.'),
+      file_types: z.array(z.enum(['pdf', 'docx', 'pptx', 'xlsx', 'txt', 'md', 'csv', 'html'])).max(8).optional()
+        .describe('Limit to these file extensions. Defaults to PDF + DOCX + PPTX.'),
+      module_pattern: z.string().max(200).optional()
+        .describe('Restrict to files appearing in modules matching this name pattern.'),
+      max_files: z.number().int().min(1).max(40).optional().default(15)
+        .describe('Maximum number of files to fetch + scan (default 15, hard cap 40).'),
+      max_hits_per_file: z.number().int().min(1).max(20).optional().default(5)
+        .describe('Maximum snippets returned per file (default 5).'),
+      snippet_chars: z.number().int().min(40).max(500).optional().default(160)
+        .describe('Characters of context shown around each hit (default 160).'),
+    },
+    async ({ course_id, query, file_types, module_pattern, max_files, max_hits_per_file, snippet_chars }) => {
+      try {
+        const allowedExt = (file_types && file_types.length > 0)
+          ? file_types
+          : ['pdf', 'docx', 'pptx'] as const;
+
+        // Compile query
+        const regexMatch = query.match(/^\/(.+)\/([gimuy]*)$/);
+        const queryRegex = regexMatch
+          ? new RegExp(regexMatch[1], regexMatch[2].includes('i') ? regexMatch[2] : regexMatch[2] + 'i')
+          : new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+
+        let modulePatternRegex: RegExp | null = null;
+        if (module_pattern) {
+          const m = module_pattern.match(/^\/(.+)\/([gimuy]*)$/);
+          modulePatternRegex = m
+            ? new RegExp(m[1], m[2].includes('i') ? m[2] : m[2] + 'i')
+            : new RegExp(module_pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+        }
+
+        const files = await client.listCourseFiles(course_id);
+        let fileIdToModule = new Map<number, string>();
+        if (modulePatternRegex) {
+          const modules = await client.listModules(course_id, { include: ['items'] });
+          for (const mod of modules) {
+            if (!modulePatternRegex.test(mod.name)) continue;
+            for (const item of mod.items ?? []) {
+              if (item.type !== 'File') continue;
+              const fid = item.content_id ?? item.id;
+              if (!fileIdToModule.has(fid)) fileIdToModule.set(fid, mod.name);
+            }
+          }
+        }
+
+        type Candidate = { file_id: number; name: string; size: number; content_type?: string; module_label: string };
+        const candidates: Candidate[] = [];
+        for (const f of files) {
+          if (modulePatternRegex && !fileIdToModule.has(f.id)) continue;
+          const ext = path.extname(f.filename).toLowerCase().replace(/^\./, '');
+          if (!(allowedExt as readonly string[]).includes(ext)) continue;
+          if (f.size > MAX_FILE_SIZE) continue;
+          candidates.push({
+            file_id: f.id,
+            name: f.display_name || f.filename,
+            size: f.size,
+            content_type: f['content-type'],
+            module_label: fileIdToModule.get(f.id) ?? 'unsorted',
+          });
+        }
+
+        const truncated = candidates.length > max_files;
+        const selected = candidates.slice(0, max_files);
+
+        type FileHit = {
+          file_id: number;
+          name: string;
+          module_label: string;
+          hits: Array<{ snippet: string; offset: number }>;
+          error?: string;
+        };
+
+        const tasks = selected.map((c) => async (): Promise<FileHit> => {
+          try {
+            const fileMeta = await client.getFile(c.file_id);
+            const buf = Buffer.from(await client.downloadFile(fileMeta.url));
+            const extracted = await extractTextFromFile(
+              buf,
+              c.content_type ?? fileMeta['content-type'] ?? '',
+              DEFAULT_MAX_TEXT_LENGTH * 4, // be generous for search
+            );
+            if (!extracted || !extracted.text) {
+              return { file_id: c.file_id, name: c.name, module_label: c.module_label, hits: [] };
+            }
+            const text = extracted.text;
+            // Reset lastIndex if the user-passed regex carries `g`.
+            queryRegex.lastIndex = 0;
+            const hits: Array<{ snippet: string; offset: number }> = [];
+            let match: RegExpExecArray | null;
+            while ((match = queryRegex.exec(text)) !== null && hits.length < max_hits_per_file) {
+              const start = Math.max(0, match.index - Math.floor(snippet_chars / 2));
+              const end = Math.min(text.length, match.index + match[0].length + Math.floor(snippet_chars / 2));
+              const raw = text.slice(start, end).replace(/\s+/g, ' ').trim();
+              hits.push({ snippet: raw, offset: match.index });
+              // Avoid infinite loop on zero-width matches
+              if (match.index === queryRegex.lastIndex) queryRegex.lastIndex++;
+              // If the regex isn't global, exec returns same result — break.
+              if (!queryRegex.global) break;
+            }
+            return { file_id: c.file_id, name: c.name, module_label: c.module_label, hits };
+          } catch (e) {
+            return {
+              file_id: c.file_id,
+              name: c.name,
+              module_label: c.module_label,
+              hits: [],
+              error: e instanceof Error ? e.message : String(e),
+            };
+          }
+        });
+
+        const settled = await runWithConcurrency(tasks, 3);
+        const fileResults: FileHit[] = [];
+        for (const s of settled) {
+          if (s.status === 'fulfilled') fileResults.push(s.value);
+        }
+        const totalHits = fileResults.reduce((sum, f) => sum + f.hits.length, 0);
+        const filesWithHits = fileResults.filter((f) => f.hits.length > 0);
+
+        return formatSuccess({
+          course_id,
+          query,
+          files_scanned: selected.length,
+          files_skipped: candidates.length - selected.length,
+          truncated,
+          total_hits: totalHits,
+          files_with_hits: filesWithHits.length,
+          results: filesWithHits,
+          ...(fileResults.some((f) => f.error) ? { errors: fileResults.filter((f) => f.error) } : {}),
+        });
+      } catch (error) {
+        return formatError('searching course files', error);
       }
     }
   );
