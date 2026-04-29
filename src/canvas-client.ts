@@ -928,8 +928,11 @@ export class CanvasClient {
       }
       return wrapped as LatePolicy;
     } catch (err) {
-      // 404 = no policy configured for this course; surface as null.
-      if (err instanceof Error && /\b404\b/.test(err.message)) return null;
+      // 404 = no policy configured. 403 = student not authorized to read
+      // (some Canvas instances scope this to teachers). Both are "no
+      // policy data available to you" → null. Real auth failures (401)
+      // re-throw so the caller can surface them.
+      if (err instanceof Error && /\b40[34]\b/.test(err.message)) return null;
       throw err;
     }
   }
