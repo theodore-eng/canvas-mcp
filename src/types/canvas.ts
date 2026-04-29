@@ -160,6 +160,23 @@ export interface Submission {
   submission_comments?: SubmissionComment[];
   attachments?: FileAttachment[];
   url?: string;
+  /**
+   * Populated when the submission is requested with
+   * `include[]=rubric_assessment`. Keys are RubricCriteria.id; values
+   * are the grader's per-criterion verdict.
+   */
+  rubric_assessment?: Record<string, RubricAssessmentEntry>;
+}
+
+export interface RubricAssessmentEntry {
+  /** Points awarded for this criterion. */
+  points?: number;
+  /** Free-form grader comment, if the rubric allows them. */
+  comments?: string;
+  /** ID of the matched RubricRating, if the grader picked a tier. */
+  rating_id?: string;
+  /** Sometimes present in full_rubric_assessment expansion. */
+  description?: string;
 }
 
 export interface SubmissionComment {

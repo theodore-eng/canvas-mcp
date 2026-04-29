@@ -29,6 +29,7 @@ import { registerActivityTools } from './tools/activity.js';
 import { registerPreferenceTools } from './tools/preferences.js';
 import { registerUntrackedTools } from './tools/untracked.js';
 import { registerSemesterTools } from './tools/semester.js';
+import { registerRubricTools } from './tools/rubrics.js';
 
 // Import prompt and resource registration
 import { registerPrompts } from './prompts.js';
@@ -108,6 +109,9 @@ async function main(): Promise<void> {
 
   // Semester setup (always active — creates local folders + saves preferences)
   registerSemesterTools(server);
+
+  // Rubric tools (always active — read only)
+  registerRubricTools(server);
 
   // Submission & discussion tools (write tools gated by ENABLE_WRITE_TOOLS)
   registerSubmissionTools(server);
