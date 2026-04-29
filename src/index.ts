@@ -30,6 +30,7 @@ import { registerPreferenceTools } from './tools/preferences.js';
 import { registerUntrackedTools } from './tools/untracked.js';
 import { registerSemesterTools } from './tools/semester.js';
 import { registerRubricTools } from './tools/rubrics.js';
+import { registerQuizTools } from './tools/quizzes.js';
 
 // Import prompt and resource registration
 import { registerPrompts } from './prompts.js';
@@ -112,6 +113,10 @@ async function main(): Promise<void> {
 
   // Rubric tools (always active — read only)
   registerRubricTools(server);
+
+  // Quiz tools (always active — read only). Closes the indeterminate-quiz
+  // gap in get_my_submission_status.
+  registerQuizTools(server);
 
   // Submission & discussion tools (write tools gated by ENABLE_WRITE_TOOLS)
   registerSubmissionTools(server);

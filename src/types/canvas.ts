@@ -761,3 +761,97 @@ export interface Tab {
   url?: string;
 }
 
+// ==================== QUIZZES ====================
+
+/**
+ * A Canvas Quiz. Lives in /courses/:id/quizzes — separate from assignments,
+ * which is why the regular submission-status path can't authoritatively
+ * tell you whether you took a quiz.
+ */
+export interface Quiz {
+  id: number;
+  title: string;
+  html_url: string;
+  mobile_url?: string;
+  description?: string | null;
+  quiz_type: 'practice_quiz' | 'assignment' | 'graded_survey' | 'survey';
+  assignment_group_id?: number | null;
+  /** Set when the quiz publishes a linked Assignment row. */
+  assignment_id?: number | null;
+  time_limit?: number | null;
+  shuffle_answers?: boolean;
+  hide_results?: 'always' | 'until_after_last_attempt' | null;
+  show_correct_answers?: boolean;
+  show_correct_answers_last_attempt?: boolean;
+  show_correct_answers_at?: string | null;
+  hide_correct_answers_at?: string | null;
+  allowed_attempts: number;
+  scoring_policy?: 'keep_highest' | 'keep_latest' | 'keep_average';
+  one_question_at_a_time?: boolean;
+  question_count?: number;
+  points_possible: number | null;
+  cant_go_back?: boolean;
+  access_code?: string | null;
+  ip_filter?: string | null;
+  due_at: string | null;
+  lock_at: string | null;
+  unlock_at: string | null;
+  published: boolean;
+  unpublishable?: boolean;
+  locked_for_user?: boolean;
+  lock_info?: LockInfo;
+  lock_explanation?: string;
+  /** Present on /quizzes/:qid response with include[]=can_unpublish etc. */
+  speedgrader_url?: string;
+  question_types?: string[];
+  has_access_code?: boolean;
+  post_to_sis?: boolean;
+  migration_id?: string;
+  one_time_results?: boolean;
+  only_visible_to_overrides?: boolean;
+  preview_url?: string;
+}
+
+export interface ListQuizzesParams {
+  search_term?: string;
+}
+
+/**
+ * A user's submission record for a single quiz attempt. The workflow_state
+ * here is authoritative for "did I take this quiz?" — bypasses the
+ * indeterminate path in get_my_submission_status.
+ */
+export interface QuizSubmission {
+  id: number;
+  user_id: number;
+  quiz_id: number;
+  attempt: number | null;
+  workflow_state:
+    | 'untaken'
+    | 'pending_review'
+    | 'complete'
+    | 'settings_only'
+    | 'preview';
+  /** Score Canvas counts (per scoring_policy). */
+  kept_score: number | null;
+  /** Score for THIS attempt. */
+  score: number | null;
+  score_before_regrade: number | null;
+  fudge_points: number | null;
+  has_seen_results: boolean;
+  started_at: string | null;
+  finished_at: string | null;
+  end_at: string | null;
+  time_spent: number | null;
+  attempts_left: number;
+  /** Linked Submission record (when quiz publishes as Assignment). */
+  submission_id?: number | null;
+  /** Total points possible at time of submission — handy for percent calcs. */
+  quiz_points_possible: number | null;
+  extra_attempts?: number | null;
+  extra_time?: number | null;
+  manually_unlocked?: boolean;
+  validation_token?: string;
+  overdue_and_needs_submission?: boolean;
+}
+

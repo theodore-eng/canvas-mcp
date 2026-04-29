@@ -37,6 +37,9 @@ import type {
   ActivityStreamItem,
   ActivityStreamSummary,
   Tab,
+  Quiz,
+  QuizSubmission,
+  ListQuizzesParams,
 } from './types/canvas.js';
 import { stripHtmlTags, stableStringify } from './utils.js';
 
@@ -901,6 +904,33 @@ export class CanvasClient {
     return this.request<unknown>(
       `/courses/${courseId}/rubrics/${rubricId}${query}`
     );
+  }
+
+  // ==================== QUIZZES ====================
+
+  async listQuizzes(
+    courseId: number,
+    params: ListQuizzesParams = {},
+  ): Promise<Quiz[]> {
+    const query = this.buildQueryString(params);
+    return this.requestPaginated<Quiz>(`/courses/${courseId}/quizzes${query}`);
+  }
+
+  async getQuiz(courseId: number, quizId: number): Promise<Quiz> {
+    return this.request<Quiz>(`/courses/${courseId}/quizzes/${quizId}`);
+  }
+
+  /**
+   * Fetch the calling user's submission(s) for a quiz. Canvas returns the
+   * shape `{ quiz_submissions: [...] }` — multiple entries when the quiz
+   * allows retakes. We unwrap and return the array as-is so callers can
+   * reason about attempts.
+   */
+  async getMyQuizSubmissions(courseId: number, quizId: number): Promise<QuizSubmission[]> {
+    const wrapped = await this.request<{ quiz_submissions: QuizSubmission[] }>(
+      `/courses/${courseId}/quizzes/${quizId}/submissions/self`,
+    );
+    return wrapped.quiz_submissions ?? [];
   }
 
   // ==================== CALENDAR ====================
