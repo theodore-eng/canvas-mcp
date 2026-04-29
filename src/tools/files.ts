@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { writeFile, mkdir } from 'fs/promises';
+import fs from 'node:fs';
+import { writeFile, mkdir, unlink } from 'fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -14,6 +15,11 @@ import {
   MAX_FILE_SIZE,
   DEFAULT_MAX_TEXT_LENGTH,
 } from '../utils.js';
+import {
+  getCourseSyncState,
+  upsertCourseSyncState,
+  type SyncFileEntry,
+} from '../services/sync-state.js';
 
 /**
  * Categorize a file based on module name and item title keywords.
@@ -830,6 +836,428 @@ export function registerFileTools(server: McpServer) {
         });
       } catch (error) {
         return formatError('searching course files', error);
+      }
+    }
+  );
+
+  // ==================== diff_course_files ====================
+  // Compare current Canvas state to the last sync_course_to_local snapshot.
+  // Reports {added, updated, removed} so the LLM can surface "Canvas drops"
+  // (silently re-uploaded problem sets, late-add slides, removed readings).
+
+  server.tool(
+    'diff_course_files',
+    'Show what changed in a course\'s files since the last sync_course_to_local run. Returns added, updated, and removed entries. Use this in daily briefings to catch silent re-uploads of problem sets or late-added slides. If sync_course_to_local has never run for this course, returns all current files as added.',
+    {
+      course_id: z.number().int().positive().describe('The Canvas course ID'),
+    },
+    async ({ course_id }) => {
+      try {
+        const snapshot = getCourseSyncState(course_id);
+        const snapshotFiles = snapshot?.files ?? {};
+
+        let liveFiles: Awaited<ReturnType<typeof client.listCourseFiles>> = [];
+        let filesApiAvailable = true;
+        try {
+          liveFiles = await client.listCourseFiles(course_id);
+        } catch {
+          filesApiAvailable = false;
+        }
+
+        // Build a uniform live-file map from whichever source we have.
+        type LiveEntry = {
+          file_id: number;
+          name: string;
+          updated_at: string | null;
+          size: number;
+          module_label: string;
+        };
+        const live = new Map<number, LiveEntry>();
+
+        if (filesApiAvailable) {
+          for (const f of liveFiles) {
+            live.set(f.id, {
+              file_id: f.id,
+              name: f.display_name || f.filename,
+              updated_at: f.updated_at ?? null,
+              size: f.size,
+              module_label: 'unsorted',
+            });
+          }
+        } else {
+          // Module-fallback path: synthesize from module File items.
+          const modules = await client.listModules(course_id, { include: ['items'] });
+          for (const mod of modules) {
+            for (const item of mod.items ?? []) {
+              if (item.type !== 'File') continue;
+              const fid = item.content_id ?? item.id;
+              if (live.has(fid)) continue;
+              live.set(fid, {
+                file_id: fid,
+                name: item.title,
+                updated_at: null,
+                size: 0,
+                module_label: mod.name,
+              });
+            }
+          }
+        }
+
+        const added: LiveEntry[] = [];
+        const updated: Array<LiveEntry & { previous_updated_at: string | null }> = [];
+        const removed: Array<{ file_id: number; name: string; module_label: string; previous_updated_at: string | null }> = [];
+
+        for (const [fid, entry] of live) {
+          const prior = snapshotFiles[String(fid)];
+          if (!prior) {
+            added.push(entry);
+            continue;
+          }
+          // Updated if Canvas updated_at advanced. If we don't have a fresh
+          // updated_at (module fallback path), fall back to size-mismatch.
+          const isUpdated = entry.updated_at && prior.updated_at
+            ? new Date(entry.updated_at) > new Date(prior.updated_at)
+            : entry.size > 0 && entry.size !== prior.size;
+          if (isUpdated) {
+            updated.push({ ...entry, previous_updated_at: prior.updated_at });
+          }
+        }
+
+        for (const [fidStr, prior] of Object.entries(snapshotFiles)) {
+          const fid = Number(fidStr);
+          if (!live.has(fid)) {
+            removed.push({
+              file_id: fid,
+              name: prior.filename,
+              module_label: prior.module_label,
+              previous_updated_at: prior.updated_at,
+            });
+          }
+        }
+
+        return formatSuccess({
+          course_id,
+          last_sync_at: snapshot?.last_sync_at ?? null,
+          has_snapshot: snapshot !== null,
+          files_api_available: filesApiAvailable,
+          added_count: added.length,
+          updated_count: updated.length,
+          removed_count: removed.length,
+          added,
+          updated,
+          removed,
+        });
+      } catch (error) {
+        return formatError('diffing course files', error);
+      }
+    }
+  );
+
+  // ==================== sync_course_to_local ====================
+  // Idempotent mirror: download files whose updated_at is newer than the
+  // recorded snapshot, skip unchanged files, optionally prune removed ones.
+  // Persists snapshot in ~/.canvas-mcp/sync-state.json via atomic write.
+
+  server.tool(
+    'sync_course_to_local',
+    'Mirror a course\'s files to a local folder. Only re-downloads files whose updated_at is newer than the last sync (or that don\'t exist on disk). Saves into <dest_root>/<sanitized-module>/<filename>. Persists state in ~/.canvas-mcp/sync-state.json so subsequent calls are incremental. Default dest_root is ~/Canvas/<course_id>. Use dry_run=true to preview without writing.',
+    {
+      course_id: z.number().int().positive().describe('The Canvas course ID'),
+      dest_root: z.string().optional()
+        .describe('Local root directory. Defaults to ~/Canvas/<course_id>. Must be under your home directory.'),
+      dry_run: z.boolean().optional().default(false)
+        .describe('Preview the sync plan without writing or recording state.'),
+      prune: z.boolean().optional().default(false)
+        .describe('When true, delete local files for entries that no longer exist in Canvas. Otherwise leave them alone (safer default).'),
+      file_types: z.array(z.enum(['pdf', 'docx', 'pptx', 'xlsx', 'txt', 'md', 'csv', 'html'])).max(8).optional()
+        .describe('Limit sync to these extensions. Omit to sync everything.'),
+      max_files: z.number().int().min(1).max(500).optional().default(100)
+        .describe('Hard cap on files to download in one sync run (default 100, max 500).'),
+    },
+    async ({ course_id, dest_root, dry_run, prune, file_types, max_files }) => {
+      try {
+        // Resolve dest_root, default to ~/Canvas/<course_id>
+        const defaultRoot = path.join(os.homedir(), 'Canvas', String(course_id));
+        const expanded = (dest_root ?? defaultRoot).replace(/^~/, os.homedir());
+        const resolvedRoot = path.resolve(expanded);
+        if (!resolvedRoot.startsWith(os.homedir())) {
+          throw new Error('dest_root must be under home directory');
+        }
+
+        const snapshot = getCourseSyncState(course_id);
+        const priorFiles = snapshot?.files ?? {};
+
+        // Build a uniform candidate set, mirroring download_course_files
+        // logic but always covering all modules (no pattern filter here).
+        let liveFiles: Awaited<ReturnType<typeof client.listCourseFiles>> = [];
+        let filesApiAvailable = true;
+        try {
+          liveFiles = await client.listCourseFiles(course_id);
+        } catch {
+          filesApiAvailable = false;
+        }
+
+        const fileIdToModule = new Map<number, string>();
+        const modules = await client.listModules(course_id, { include: ['items'] });
+        for (const mod of modules) {
+          for (const item of mod.items ?? []) {
+            if (item.type !== 'File') continue;
+            const fid = item.content_id ?? item.id;
+            if (!fileIdToModule.has(fid)) fileIdToModule.set(fid, mod.name);
+          }
+        }
+
+        type Candidate = {
+          file_id: number;
+          name: string;
+          size: number;
+          updated_at: string | null;
+          module_label: string;
+        };
+        const candidates: Candidate[] = [];
+
+        if (filesApiAvailable) {
+          for (const f of liveFiles) {
+            if (file_types && file_types.length > 0) {
+              const ext = path.extname(f.filename).toLowerCase().replace(/^\./, '');
+              if (!file_types.includes(ext as typeof file_types[number])) continue;
+            }
+            candidates.push({
+              file_id: f.id,
+              name: f.display_name || f.filename,
+              size: f.size,
+              updated_at: f.updated_at ?? null,
+              module_label: fileIdToModule.get(f.id) ?? 'unsorted',
+            });
+          }
+        } else {
+          // Module-fallback: we have ids + titles only.
+          for (const [fid, modLabel] of fileIdToModule) {
+            const ext = path.extname('').toLowerCase().replace(/^\./, '');
+            if (file_types && file_types.length > 0 && !file_types.includes(ext as typeof file_types[number])) {
+              // Without a filename we can't filter by extension here; skip
+              // when explicit filter set.
+              continue;
+            }
+            candidates.push({
+              file_id: fid,
+              name: `file:${fid}`,
+              size: 0,
+              updated_at: null,
+              module_label: modLabel,
+            });
+          }
+        }
+
+        // Decide which candidates need download
+        type Plan = Candidate & { reason: 'new' | 'updated' | 'missing_local' };
+        const plan: Plan[] = [];
+        for (const c of candidates) {
+          const prior = priorFiles[String(c.file_id)];
+          if (!prior) {
+            plan.push({ ...c, reason: 'new' });
+            continue;
+          }
+          // local file gone? re-download
+          if (!fs.existsSync(prior.local_path)) {
+            plan.push({ ...c, reason: 'missing_local' });
+            continue;
+          }
+          // updated upstream?
+          if (c.updated_at && prior.updated_at && new Date(c.updated_at) > new Date(prior.updated_at)) {
+            plan.push({ ...c, reason: 'updated' });
+            continue;
+          }
+          // Fallback for module-only candidates: trust the snapshot, treat
+          // as unchanged (no updated_at to compare). User can force-resync
+          // by passing prune=true and re-running.
+        }
+
+        const truncated = plan.length > max_files;
+        const planSelected = plan.slice(0, max_files);
+
+        // Prune list: snapshot entries no longer present in `live`.
+        const liveIds = new Set(candidates.map((c) => c.file_id));
+        const pruneTargets: Array<{ file_id: number; local_path: string; filename: string }> = [];
+        for (const [fidStr, prior] of Object.entries(priorFiles)) {
+          if (!liveIds.has(Number(fidStr))) {
+            pruneTargets.push({
+              file_id: Number(fidStr),
+              local_path: prior.local_path,
+              filename: prior.filename,
+            });
+          }
+        }
+
+        const sanitizeFolder = (s: string): string =>
+          s.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'untitled';
+
+        if (dry_run) {
+          return formatSuccess({
+            course_id,
+            dest_root: resolvedRoot,
+            dry_run: true,
+            files_api_available: filesApiAvailable,
+            unchanged_count: candidates.length - plan.length,
+            plan_count: plan.length,
+            truncated,
+            plan: planSelected.map((p) => ({
+              file_id: p.file_id,
+              name: p.name,
+              module_label: p.module_label,
+              reason: p.reason,
+              size_human: formatFileSize(p.size),
+            })),
+            prune_count: pruneTargets.length,
+            prune_targets: prune ? pruneTargets : [],
+          });
+        }
+
+        // Real sync: concurrency 3
+        type SyncResult = {
+          file_id: number;
+          name: string;
+          module_label: string;
+          reason: 'new' | 'updated' | 'missing_local';
+          local_path?: string;
+          size_bytes?: number;
+          skipped_reason?: string;
+        };
+
+        const downloadTasks = planSelected.map((p) => async (): Promise<{ result: SyncResult; entry?: SyncFileEntry }> => {
+          const fileMeta = await client.getFile(p.file_id);
+          if (fileMeta.size > MAX_FILE_SIZE) {
+            return {
+              result: {
+                file_id: p.file_id,
+                name: p.name,
+                module_label: p.module_label,
+                reason: p.reason,
+                skipped_reason: `File exceeds MAX_FILE_SIZE (${formatFileSize(MAX_FILE_SIZE)})`,
+              },
+            };
+          }
+          const moduleFolder = sanitizeFolder(p.module_label);
+          const targetSubdir = path.join(resolvedRoot, moduleFolder);
+          const resolvedSubdir = path.resolve(targetSubdir);
+          if (!resolvedSubdir.startsWith(resolvedRoot)) {
+            return {
+              result: {
+                file_id: p.file_id,
+                name: p.name,
+                module_label: p.module_label,
+                reason: p.reason,
+                skipped_reason: 'Path confinement check failed',
+              },
+            };
+          }
+          await mkdir(resolvedSubdir, { recursive: true });
+          const safeName = path.basename(fileMeta.filename).replace(/[/\\]/g, '_');
+          const localPath = path.join(resolvedSubdir, safeName);
+          const resolvedLocal = path.resolve(localPath);
+          if (!resolvedLocal.startsWith(resolvedSubdir)) {
+            return {
+              result: {
+                file_id: p.file_id,
+                name: p.name,
+                module_label: p.module_label,
+                reason: p.reason,
+                skipped_reason: 'Filename would write outside subdirectory',
+              },
+            };
+          }
+          const arrayBuffer = await client.downloadFile(fileMeta.url);
+          await writeFile(resolvedLocal, Buffer.from(arrayBuffer));
+          return {
+            result: {
+              file_id: p.file_id,
+              name: p.name,
+              module_label: p.module_label,
+              reason: p.reason,
+              local_path: resolvedLocal,
+              size_bytes: fileMeta.size,
+            },
+            entry: {
+              updated_at: fileMeta.updated_at ?? null,
+              size: fileMeta.size,
+              local_path: resolvedLocal,
+              filename: safeName,
+              module_label: p.module_label,
+            },
+          };
+        });
+
+        const settled = await runWithConcurrency(downloadTasks, 3);
+        const downloaded: SyncResult[] = [];
+        const skipped: SyncResult[] = [];
+        const failures: Array<{ file_id: number; name: string; error: string }> = [];
+
+        // Build a fresh snapshot starting from prior, then update with new
+        // entries and prune any removed (only if prune=true).
+        const newFiles: Record<string, SyncFileEntry> = { ...priorFiles };
+
+        settled.forEach((s, i) => {
+          if (s.status === 'fulfilled') {
+            const { result, entry } = s.value;
+            if (result.skipped_reason) {
+              skipped.push(result);
+              return;
+            }
+            downloaded.push(result);
+            if (entry) newFiles[String(result.file_id)] = entry;
+          } else {
+            const p = planSelected[i];
+            failures.push({
+              file_id: p.file_id,
+              name: p.name,
+              error: s.reason instanceof Error ? s.reason.message : String(s.reason),
+            });
+          }
+        });
+
+        // Prune
+        const pruned: typeof pruneTargets = [];
+        if (prune) {
+          for (const target of pruneTargets) {
+            try {
+              if (fs.existsSync(target.local_path)) {
+                await unlink(target.local_path);
+              }
+              delete newFiles[String(target.file_id)];
+              pruned.push(target);
+            } catch (err) {
+              failures.push({
+                file_id: target.file_id,
+                name: target.filename,
+                error: `prune failed: ${err instanceof Error ? err.message : String(err)}`,
+              });
+            }
+          }
+        }
+
+        upsertCourseSyncState({
+          course_id,
+          last_sync_at: new Date().toISOString(),
+          files: newFiles,
+        });
+
+        return formatSuccess({
+          course_id,
+          dest_root: resolvedRoot,
+          files_api_available: filesApiAvailable,
+          downloaded_count: downloaded.length,
+          unchanged_count: candidates.length - plan.length,
+          skipped_count: skipped.length,
+          failed_count: failures.length,
+          pruned_count: pruned.length,
+          truncated,
+          downloaded,
+          ...(skipped.length > 0 ? { skipped } : {}),
+          ...(failures.length > 0 ? { failures } : {}),
+          ...(prune && pruned.length > 0 ? { pruned } : {}),
+        });
+      } catch (error) {
+        return formatError('syncing course files', error);
       }
     }
   );
