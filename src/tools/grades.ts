@@ -12,11 +12,9 @@ export function registerGradeTools(server: McpServer) {
     {},
     async () => {
       try {
-        const courses = await client.listCourses({
-          enrollment_state: 'active',
-          state: ['available'],
-          include: ['total_scores', 'current_grading_period_scores', 'term'],
-        });
+        // Use current-term filter so old/future-term enrollments don't
+        // pollute the grades report.
+        const courses = await client.getCurrentCourses(['total_scores']);
 
         const coursesWithEnrollments = courses.filter(
           course => course.enrollments && course.enrollments.length > 0
@@ -113,7 +111,7 @@ export function registerGradeTools(server: McpServer) {
     {},
     async () => {
       try {
-        const courses = await client.getActiveCourses();
+        const courses = await client.getCurrentCourses();
 
         const results = await runWithConcurrency(
           courses.map((course) => async () => {

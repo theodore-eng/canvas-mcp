@@ -22,7 +22,7 @@ export function registerFeedbackTools(server: McpServer) {
           const course = await client.getCourse(course_id);
           courses = [{ id: course_id, name: course.name, course_code: course.course_code }];
         } else {
-          courses = await client.getActiveCourses();
+          courses = await client.getCurrentCourses();
         }
 
         const cutoffDate = new Date(Date.now() - days_back * 24 * 60 * 60 * 1000);

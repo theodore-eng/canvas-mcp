@@ -31,12 +31,10 @@ export function registerDashboardTools(server: McpServer) {
         const warnings: string[] = [];
 
         // ===== WAVE 1: Fetch courses, todos, planner items in parallel =====
+        // getCurrentCourses filters out past/future-term enrollments that
+        // Canvas's enrollment_state=active otherwise leaks through.
         const [coursesResult, todosResult, plannerResult] = await Promise.allSettled([
-          client.listCourses({
-            enrollment_state: 'active',
-            state: ['available'],
-            include: ['total_scores', 'term'],
-          }),
+          client.getCurrentCourses(['total_scores']),
           client.getTodoItems(),
           client.listPlannerItems({
             start_date: todayStr,

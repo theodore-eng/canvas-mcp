@@ -57,19 +57,8 @@ export function registerSemesterTools(server: McpServer) {
           throw new Error('Path must be under home directory');
         }
 
-        // 2. Get active courses with term info
-        const allCourses = await client.listCourses({
-          enrollment_state: 'active',
-          state: ['available'],
-          include: ['total_scores', 'term'],
-        });
-
-        // 3. Filter to current/future courses (term end date > now, or no term end date)
-        const now = new Date();
-        const courses = allCourses.filter(course => {
-          if (!course.term?.end_at) return true;
-          return new Date(course.term.end_at) > now;
-        });
+        // 2. Get current-term courses (filters out past AND future terms)
+        const courses = await client.getCurrentCourses(['total_scores']);
 
         if (courses.length === 0) {
           return formatSuccess({

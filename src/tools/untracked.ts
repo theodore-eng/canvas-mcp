@@ -237,7 +237,7 @@ export function registerUntrackedTools(server: McpServer) {
           const course = await client.getCourse(course_id);
           courses = [course];
         } else {
-          const allCourses = await client.getActiveCourses();
+          const allCourses = await client.getCurrentCourses();
           // Filter out past courses by term end date
           const now = new Date();
           courses = allCourses.filter(course => {

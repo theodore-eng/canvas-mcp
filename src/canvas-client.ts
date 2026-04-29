@@ -507,7 +507,10 @@ export class CanvasClient {
   }
 
   /**
-   * Get all active, available courses. Convenience wrapper for the common pattern.
+   * Get all active, available courses (raw Canvas filter — does NOT
+   * exclude past or future terms). Most callers want getCurrentCourses
+   * instead; keep this for the user-facing list_courses tool where the
+   * caller may explicitly want every enrollment.
    */
   async getActiveCourses(include?: string[]): Promise<Course[]> {
     return this.listCourses({
@@ -518,10 +521,47 @@ export class CanvasClient {
   }
 
   /**
-   * Get context_codes for all active courses (e.g., ["course_123", "course_456"]).
+   * Get courses Theo is actively taking *right now* — filtered to the
+   * current term. Canvas's `enrollment_state: 'active'` does NOT filter
+   * by term dates, so a "completed" 16-week semester whose enrollment
+   * lingers as active will still leak through. We apply an in-memory
+   * term-date filter:
+   *
+   *   - Effective start (term.start_at OR course.start_at): in the past
+   *     OR null.
+   *   - Effective end   (term.end_at   OR course.end_at):   in the future
+   *     OR null.
+   *   - workflow_state is 'available'.
+   *
+   * Also implicitly drops courses missing an active enrollment record.
+   * Always requests `include[]=term` so callers don't have to remember.
+   */
+  async getCurrentCourses(include?: string[]): Promise<Course[]> {
+    const includes = new Set<'term' | 'total_students' | 'syllabus_body' | 'total_scores'>([
+      'term',
+    ]);
+    if (include) {
+      for (const i of include) {
+        if (i === 'term' || i === 'total_students' || i === 'syllabus_body' || i === 'total_scores') {
+          includes.add(i);
+        }
+      }
+    }
+    const all = await this.listCourses({
+      enrollment_state: 'active',
+      state: ['available'],
+      include: Array.from(includes) as ('term' | 'total_students' | 'syllabus_body')[],
+    });
+    const now = new Date();
+    return all.filter((c) => isCurrentTermCourse(c, now));
+  }
+
+  /**
+   * Get context_codes for all currently-enrolled courses
+   * (e.g., ["course_123", "course_456"]).
    */
   async getActiveCourseContextCodes(): Promise<string[]> {
-    const courses = await this.getActiveCourses();
+    const courses = await this.getCurrentCourses();
     return courses.map(c => `course_${c.id}`);
   }
 
@@ -1365,6 +1405,54 @@ export class CanvasClient {
 
 // Singleton instance creator
 let clientInstance: CanvasClient | null = null;
+
+/**
+ * Shared "is this a course Theo is actively taking right now?" predicate.
+ * Used by getCurrentCourses and any tool that needs to filter a
+ * pre-fetched course list to the current academic term.
+ *
+ * Why the strict version:
+ * Canvas's `enrollment_state: 'active'` returns *every* enrolled course
+ * including non-academic sandboxes ("Default Term") and onboarding
+ * modules ("Ongoing", e.g., AlcoholEdu, U Got This). Those terms carry
+ * null start/end dates so a generous filter keeps them. Real registrar
+ * terms always have BOTH start_at and end_at set (UW-Madison: "Spring
+ * 2025-2026" with explicit dates).
+ *
+ * Decision rules (all must pass):
+ *   1. workflow_state === 'available'
+ *   2. Course has a term with BOTH explicit start_at and end_at — this
+ *      is what distinguishes academic semesters from sandboxes
+ *      ("Default Term") and rolling onboarding ("Ongoing")
+ *   3. now is within [term.start_at, term.end_at]
+ *
+ * Falls back to course.start_at / course.end_at only if the course has
+ * NO term object — rare for real academic courses, common for "ongoing"
+ * sandboxes which we want to reject anyway.
+ */
+export function isCurrentTermCourse(course: Course, now: Date = new Date()): boolean {
+  if (course.workflow_state !== 'available') return false;
+
+  // Prefer term dates if present. The presence of BOTH dates is the key
+  // signal that this is a real registrar-managed semester.
+  if (course.term) {
+    const start = course.term.start_at ? new Date(course.term.start_at) : null;
+    const end = course.term.end_at ? new Date(course.term.end_at) : null;
+    if (!start || !end || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+      return false; // Term exists but no real dates — sandbox / onboarding
+    }
+    return start <= now && now <= end;
+  }
+
+  // No term object at all — fall back to course-level dates with the
+  // same strictness (must have both, must span now).
+  const start = course.start_at ? new Date(course.start_at) : null;
+  const end = course.end_at ? new Date(course.end_at) : null;
+  if (!start || !end || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    return false;
+  }
+  return start <= now && now <= end;
+}
 
 export function getCanvasClient(): CanvasClient {
   if (!clientInstance) {
