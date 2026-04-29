@@ -27,11 +27,7 @@ export function registerResources(server: McpServer) {
     },
     async (uri) => {
       try {
-        const courses = await client.listCourses({
-          enrollment_state: 'active',
-          state: ['available'],
-          include: ['total_scores', 'term'],
-        });
+        const courses = await client.getCurrentCourses(['total_scores']);
 
         const grades = courses
           .filter(c => c.enrollments && c.enrollments.length > 0)
@@ -77,11 +73,7 @@ export function registerResources(server: McpServer) {
     },
     async (uri) => {
       try {
-        const courses = await client.listCourses({
-          enrollment_state: 'active',
-          state: ['available'],
-          include: ['term', 'total_students'],
-        });
+        const courses = await client.getCurrentCourses(['total_students']);
 
         const courseList = courses.map(c => ({
           id: c.id,
@@ -119,10 +111,7 @@ export function registerResources(server: McpServer) {
     new ResourceTemplate('canvas://courses/{courseId}/syllabus', {
       list: async () => {
         try {
-          const courses = await client.listCourses({
-            enrollment_state: 'active',
-            state: ['available'],
-          });
+          const courses = await client.getCurrentCourses();
           return {
             resources: courses.map(c => ({
               uri: `canvas://courses/${c.id}/syllabus`,
@@ -184,10 +173,7 @@ export function registerResources(server: McpServer) {
     new ResourceTemplate('canvas://courses/{courseId}/assignments', {
       list: async () => {
         try {
-          const courses = await client.listCourses({
-            enrollment_state: 'active',
-            state: ['available'],
-          });
+          const courses = await client.getCurrentCourses();
           return {
             resources: courses.map(c => ({
               uri: `canvas://courses/${c.id}/assignments`,
@@ -322,10 +308,7 @@ export function registerResources(server: McpServer) {
     new ResourceTemplate('canvas://courses/{courseId}/modules', {
       list: async () => {
         try {
-          const courses = await client.listCourses({
-            enrollment_state: 'active',
-            state: ['available'],
-          });
+          const courses = await client.getCurrentCourses();
           return {
             resources: courses.map(c => ({
               uri: `canvas://courses/${c.id}/modules`,

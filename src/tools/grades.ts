@@ -12,11 +12,9 @@ export function registerGradeTools(server: McpServer) {
     {},
     async () => {
       try {
-        const courses = await client.listCourses({
-          enrollment_state: 'active',
-          state: ['available'],
-          include: ['total_scores', 'current_grading_period_scores', 'term'],
-        });
+        // Use current-term filter so old/future-term enrollments don't
+        // pollute the grades report.
+        const courses = await client.getCurrentCourses(['total_scores']);
 
         const coursesWithEnrollments = courses.filter(
           course => course.enrollments && course.enrollments.length > 0
@@ -109,11 +107,11 @@ export function registerGradeTools(server: McpServer) {
 
   server.tool(
     'get_my_submission_status',
-    'Check what you have and haven\'t submitted across all courses. Shows missing and not-yet-due assignments with points at risk. Use this to find overdue work.',
+    'Check what you have and haven\'t submitted across all courses. Returns three buckets: confirmed_submitted (workflow_state=submitted/graded), confirmed_missing (no submission, past due, regular assignment type), and indeterminate (past due but submission state may live elsewhere — quizzes, discussions, group assignments). NEVER treat indeterminate as missing without a follow-up check.',
     {},
     async () => {
       try {
-        const courses = await client.getActiveCourses();
+        const courses = await client.getCurrentCourses();
 
         const results = await runWithConcurrency(
           courses.map((course) => async () => {
@@ -122,14 +120,29 @@ export function registerGradeTools(server: McpServer) {
             });
 
             const now = new Date();
-            const missing: Array<{
+            const confirmedMissing: Array<{
+              assignment_id: number;
+              course_id: number;
               name: string;
               due_at: string | null;
               points_possible: number;
               days_overdue: number | null;
               html_url: string;
             }> = [];
+            const indeterminate: Array<{
+              assignment_id: number;
+              course_id: number;
+              name: string;
+              due_at: string | null;
+              points_possible: number;
+              days_overdue: number | null;
+              html_url: string;
+              reason: 'quiz' | 'discussion' | 'group';
+              hint: string;
+            }> = [];
             const notYetDue: Array<{
+              assignment_id: number;
+              course_id: number;
               name: string;
               due_at: string | null;
               points_possible: number;
@@ -144,35 +157,83 @@ export function registerGradeTools(server: McpServer) {
 
               if (isSubmitted) {
                 submittedCount++;
-              } else if (a.due_at && new Date(a.due_at) < now) {
-                missing.push({
-                  name: a.name,
-                  due_at: a.due_at,
-                  points_possible: a.points_possible,
-                  days_overdue: Math.floor((now.getTime() - new Date(a.due_at).getTime()) / (1000 * 60 * 60 * 24)),
-                  html_url: a.html_url,
-                });
-              } else if (a.due_at && new Date(a.due_at) >= now) {
+                continue;
+              }
+
+              if (a.due_at && new Date(a.due_at) >= now) {
                 notYetDue.push({
+                  assignment_id: a.id,
+                  course_id: course.id,
                   name: a.name,
                   due_at: a.due_at,
                   points_possible: a.points_possible,
                   html_url: a.html_url,
                 });
+                continue;
+              }
+
+              if (!a.due_at || new Date(a.due_at) >= now) continue;
+
+              // Past due, not submitted. Decide if this is truly "missing" or
+              // if the submission state lives in an API we did not query
+              // (quizzes, discussions, group assignments). Be conservative:
+              // anything we cannot confirm goes into the indeterminate bucket
+              // so the briefing never claims "you didn't do X" without proof.
+              const types = a.submission_types ?? [];
+              const isQuiz = types.includes('online_quiz');
+              const isDiscussion = types.includes('discussion_topic');
+              // Canvas exposes group_category_id on assignments; not yet in
+              // our type — read defensively.
+              const groupCategoryId = (a as unknown as { group_category_id?: number | null }).group_category_id ?? null;
+              const isGroup = groupCategoryId != null;
+
+              const daysOverdue = Math.floor((now.getTime() - new Date(a.due_at).getTime()) / (1000 * 60 * 60 * 24));
+              const baseEntry = {
+                assignment_id: a.id,
+                course_id: course.id,
+                name: a.name,
+                due_at: a.due_at,
+                points_possible: a.points_possible,
+                days_overdue: daysOverdue,
+                html_url: a.html_url,
+              };
+
+              if (isQuiz) {
+                indeterminate.push({
+                  ...baseEntry,
+                  reason: 'quiz',
+                  hint: 'Canvas Quizzes track submission state separately. Verify via the quizzes API or by visiting the assignment URL.',
+                });
+              } else if (isDiscussion) {
+                indeterminate.push({
+                  ...baseEntry,
+                  reason: 'discussion',
+                  hint: 'Discussion participation may not surface as a submission. Verify by listing discussion entries authored by self.',
+                });
+              } else if (isGroup) {
+                indeterminate.push({
+                  ...baseEntry,
+                  reason: 'group',
+                  hint: 'Group assignment — your teammate may have submitted on the group\'s behalf. Verify the group\'s submission record.',
+                });
+              } else {
+                confirmedMissing.push(baseEntry);
               }
             }
 
             return {
               course_id: course.id,
               course_name: course.name,
-              missing: missing.sort((a, b) => (b.days_overdue ?? 0) - (a.days_overdue ?? 0)),
+              confirmed_missing: confirmedMissing.sort((a, b) => (b.days_overdue ?? 0) - (a.days_overdue ?? 0)),
+              indeterminate: indeterminate.sort((a, b) => (b.days_overdue ?? 0) - (a.days_overdue ?? 0)),
               not_yet_due: notYetDue.sort((a, b) => {
                 if (!a.due_at) return 1;
                 if (!b.due_at) return -1;
                 return new Date(a.due_at).getTime() - new Date(b.due_at).getTime();
               }),
               submitted_count: submittedCount,
-              missing_count: missing.length,
+              confirmed_missing_count: confirmedMissing.length,
+              indeterminate_count: indeterminate.length,
             };
           })
         );
@@ -181,24 +242,32 @@ export function registerGradeTools(server: McpServer) {
           .filter((r): r is PromiseFulfilledResult<{
             course_id: number;
             course_name: string;
-            missing: Array<{ name: string; due_at: string | null; points_possible: number; days_overdue: number | null; html_url: string }>;
-            not_yet_due: Array<{ name: string; due_at: string | null; points_possible: number; html_url: string }>;
+            confirmed_missing: Array<{ assignment_id: number; course_id: number; name: string; due_at: string | null; points_possible: number; days_overdue: number | null; html_url: string }>;
+            indeterminate: Array<{ assignment_id: number; course_id: number; name: string; due_at: string | null; points_possible: number; days_overdue: number | null; html_url: string; reason: 'quiz' | 'discussion' | 'group'; hint: string }>;
+            not_yet_due: Array<{ assignment_id: number; course_id: number; name: string; due_at: string | null; points_possible: number; html_url: string }>;
             submitted_count: number;
-            missing_count: number;
+            confirmed_missing_count: number;
+            indeterminate_count: number;
           }> => r.status === 'fulfilled')
           .map(r => r.value);
 
-        const totalMissing = courseResults.reduce((sum, c) => sum + c.missing_count, 0);
+        const totalConfirmedMissing = courseResults.reduce((sum, c) => sum + c.confirmed_missing_count, 0);
+        const totalIndeterminate = courseResults.reduce((sum, c) => sum + c.indeterminate_count, 0);
         const totalPointsAtRisk = courseResults.reduce((sum, c) =>
-          sum + c.missing.reduce((s, m) => s + m.points_possible, 0), 0);
+          sum + c.confirmed_missing.reduce((s, m) => s + m.points_possible, 0), 0);
+        const totalIndeterminatePoints = courseResults.reduce((sum, c) =>
+          sum + c.indeterminate.reduce((s, m) => s + m.points_possible, 0), 0);
 
         const failedCourses = results
           .map((r, i) => r.status === 'rejected' ? courses[i].name : null)
           .filter(Boolean);
 
         return formatSuccess({
-          total_missing: totalMissing,
+          total_confirmed_missing: totalConfirmedMissing,
+          total_indeterminate: totalIndeterminate,
           total_points_at_risk: totalPointsAtRisk,
+          total_indeterminate_points: totalIndeterminatePoints,
+          contract_note: 'Per the briefing contract, do NOT report indeterminate items as "missing" without further verification — they are quizzes / discussions / group assignments where submission state may live in another API.',
           courses: courseResults,
           ...(failedCourses.length > 0 ? { failed_courses: failedCourses } : {}),
         });

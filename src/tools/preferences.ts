@@ -16,9 +16,9 @@ export function registerPreferenceTools(server: McpServer) {
     {
       category: z.enum(['display', 'priorities', 'behavior', 'courses'])
         .describe('Preference category'),
-      key: z.string()
+      key: z.string().min(1).max(200)
         .describe('Preference key name'),
-      value: z.string()
+      value: z.string().max(50_000)
         .describe('Preference value (JSON-parsed if possible, otherwise stored as string)'),
     },
     async ({ category, key, value }) => {
@@ -92,7 +92,7 @@ export function registerPreferenceTools(server: McpServer) {
     {
       category: z.enum(['display', 'priorities', 'behavior', 'courses'])
         .describe('Preference category'),
-      key: z.string()
+      key: z.string().min(1).max(200)
         .describe('Preference key to delete'),
     },
     async ({ category, key }) => {
@@ -115,7 +115,7 @@ export function registerPreferenceTools(server: McpServer) {
     'save_context_note',
     'Save a learning note about the user to remember across sessions. Use this to record workflow patterns, preferences observed, or important context.',
     {
-      note: z.string()
+      note: z.string().min(1).max(50_000)
         .describe('The context note to save'),
       category: z.enum(['workflow_patterns', 'conversation_notes', 'preferences_applied']).optional()
         .describe('Note category (default: workflow_patterns)'),

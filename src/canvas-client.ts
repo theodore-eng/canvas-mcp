@@ -37,6 +37,13 @@ import type {
   ActivityStreamItem,
   ActivityStreamSummary,
   Tab,
+  Quiz,
+  QuizSubmission,
+  ListQuizzesParams,
+  LatePolicy,
+  StudentAssignmentAnalytics,
+  Group,
+  GroupMembership,
 } from './types/canvas.js';
 import { stripHtmlTags, stableStringify } from './utils.js';
 
@@ -55,6 +62,33 @@ export class CanvasClient {
 
   /** In-memory cache with TTL and LRU eviction */
   private cache = new Map<string, { data: unknown; expiresAt: number }>();
+
+  /**
+   * Structured record of pagination truncation events. Tools can call
+   * consumePaginationTruncations() to surface these to the LLM via warnings.
+   */
+  private paginationTruncations: Array<{
+    endpoint: string;
+    reason: 'max_pages' | 'max_items' | 'origin_mismatch';
+    pages: number;
+    items: number;
+  }> = [];
+
+  /**
+   * Drain and return the structured truncation log accumulated since the last
+   * call. Idempotent across consumers — each gets the events that occurred
+   * during their wave, and the buffer is cleared after read.
+   */
+  public consumePaginationTruncations(): Array<{
+    endpoint: string;
+    reason: 'max_pages' | 'max_items' | 'origin_mismatch';
+    pages: number;
+    items: number;
+  }> {
+    const out = this.paginationTruncations;
+    this.paginationTruncations = [];
+    return out;
+  }
 
   /** Maximum cache entries before LRU eviction */
   private static readonly MAX_CACHE_ENTRIES = 500;
@@ -98,15 +132,38 @@ export class CanvasClient {
    */
   private isAllowedFileUrl(url: string): boolean {
     try {
-      const hostname = new URL(url).hostname;
+      const parsed = new URL(url);
+      // Reject non-HTTPS upfront (defense-in-depth)
+      if (parsed.protocol !== 'https:') return false;
+      const hostname = parsed.hostname.toLowerCase();
       // Allow Canvas origin
-      if (hostname === new URL(this.baseUrl).hostname) return true;
-      // Allow known S3 patterns used by Canvas/Instructure
-      if (hostname === 'instructure-uploads.s3.amazonaws.com') return true;
-      if (/^[\w.-]+\.s3\.amazonaws\.com$/.test(hostname)) return true;
-      if (/^[\w.-]+\.s3\.[\w-]+\.amazonaws\.com$/.test(hostname)) return true;
+      if (hostname === new URL(this.baseUrl).hostname.toLowerCase()) return true;
       // Allow Instructure CDN domains
-      if (hostname.endsWith('.instructure.com')) return true;
+      if (hostname === 'instructure.com' || hostname.endsWith('.instructure.com')) return true;
+      // S3 hostname must end exactly with one of these suffixes — a label-aware
+      // check, so attacker-controlled `evil.com.s3.amazonaws.com` is rejected.
+      // Strategy: split into labels, verify the trailing labels match the AWS
+      // S3 schema, and that there's at least one bucket label in front.
+      const labels = hostname.split('.');
+      // <bucket>.s3.amazonaws.com (legacy global)
+      if (
+        labels.length >= 4 &&
+        labels[labels.length - 3] === 's3' &&
+        labels[labels.length - 2] === 'amazonaws' &&
+        labels[labels.length - 1] === 'com'
+      ) {
+        return true;
+      }
+      // <bucket>.s3.<region>.amazonaws.com (regional virtual-hosted)
+      // OR  <bucket>.s3-<region>.amazonaws.com (legacy dash form)
+      if (
+        labels.length >= 5 &&
+        (labels[labels.length - 4] === 's3' || labels[labels.length - 4].startsWith('s3-')) &&
+        labels[labels.length - 2] === 'amazonaws' &&
+        labels[labels.length - 1] === 'com'
+      ) {
+        return true;
+      }
       return false;
     } catch {
       return false;
@@ -184,6 +241,14 @@ export class CanvasClient {
   /**
    * Fetch with retry logic for transient errors (429, 5xx).
    * Uses exponential backoff and honors Retry-After header.
+   *
+   * Two abort semantics in play:
+   *   - callerSignal: external timeout/cancellation — re-thrown immediately,
+   *     never retried.
+   *   - per-attempt timeout: created via createTimeoutSignal() — counts as a
+   *     transient network error and IS retried (with backoff).
+   *   - total operation budget: hard ceiling across all attempts; once
+   *     exceeded, no further attempts are made.
    */
   private async fetchWithRetry(
     url: string,
@@ -191,12 +256,25 @@ export class CanvasClient {
     callerSignal?: AbortSignal | null,
   ): Promise<Response> {
     let lastError: Error | null = null;
+    const TOTAL_OPERATION_BUDGET_MS = 90_000; // hard ceiling across retries
+    const operationStart = Date.now();
+    const RETRY_AFTER_CAP_MS = 60_000;
 
     for (let attempt = 0; attempt <= CanvasClient.MAX_RETRIES; attempt++) {
+      // Budget check before each attempt
+      const elapsed = Date.now() - operationStart;
+      if (elapsed >= TOTAL_OPERATION_BUDGET_MS) {
+        throw lastError ?? new Error(
+          `Canvas request exceeded total operation budget (${TOTAL_OPERATION_BUDGET_MS}ms) on ${url}`,
+        );
+      }
+
+      // Per-attempt timeout signal (separate from caller-provided abort)
+      const attemptSignal = callerSignal ?? this.createTimeoutSignal();
       try {
         const response = await fetch(url, {
           ...options,
-          signal: callerSignal ?? this.createTimeoutSignal(),
+          signal: attemptSignal,
         });
 
         // Don't retry on success or non-retryable errors
@@ -205,10 +283,15 @@ export class CanvasClient {
         const isRetryable = response.status === 429 || response.status >= 500;
         if (!isRetryable || attempt === CanvasClient.MAX_RETRIES) {
           const errorBody = await response.text();
-          throw new Error(this.sanitizeErrorMessage(response.status, response.statusText, errorBody));
+          // Tag this as a deliberate non-retryable throw so the catch-block
+          // backoff path skips it and re-throws immediately.
+          const handlerError = new Error(this.sanitizeErrorMessage(response.status, response.statusText, errorBody));
+          (handlerError as Error & { __noRetry?: boolean }).__noRetry = true;
+          throw handlerError;
         }
 
-        // Calculate backoff delay
+        // Calculate backoff delay. Cap Retry-After to prevent a hostile or
+        // misconfigured server from parking the process for hours.
         const retryAfter = response.headers.get('Retry-After');
         let delayMs: number;
         if (retryAfter) {
@@ -217,14 +300,50 @@ export class CanvasClient {
         } else {
           delayMs = 1000 * Math.pow(2, attempt); // 1s, 2s, 4s
         }
+        delayMs = Math.min(delayMs, RETRY_AFTER_CAP_MS);
+
+        // Don't sleep past the operation budget
+        const remaining = TOTAL_OPERATION_BUDGET_MS - (Date.now() - operationStart);
+        if (delayMs >= remaining) {
+          const budgetErr = new Error(
+            `Canvas API ${response.status}: would exceed operation budget while waiting ${delayMs}ms`,
+          );
+          (budgetErr as Error & { __noRetry?: boolean }).__noRetry = true;
+          throw budgetErr;
+        }
 
         console.error(`Canvas API ${response.status}: retrying in ${delayMs}ms (attempt ${attempt + 1}/${CanvasClient.MAX_RETRIES})`);
         await response.text(); // consume body before retry
         await new Promise(resolve => setTimeout(resolve, delayMs));
       } catch (error) {
-        if (error instanceof Error && error.name === 'AbortError') throw error;
+        // Deliberate non-retryable throw from the response-handler path
+        // (HTTP 4xx, MAX_RETRIES exhausted, or budget-would-exceed): escape
+        // the loop immediately. Without this short-circuit a 4xx would be
+        // caught here and retried.
+        if ((error as Error & { __noRetry?: boolean })?.__noRetry) {
+          throw error;
+        }
+        // Caller-provided abort: re-throw immediately, do not retry.
+        if (callerSignal && callerSignal.aborted) {
+          throw error;
+        }
+        // Per-attempt timeout (AbortError from our own signal): treat as
+        // transient and retry with shorter backoff. Network errors get a
+        // tighter schedule than HTTP 5xx — we don't want to compound a
+        // localized network blip with seconds of sleep.
+        const isTimeout = error instanceof Error && error.name === 'AbortError';
         lastError = error instanceof Error ? error : new Error(String(error));
         if (attempt === CanvasClient.MAX_RETRIES) throw lastError;
+        // Network-error backoff: 250ms, 500ms, 1000ms (≤1.75s total).
+        const backoffMs = Math.min(250 * Math.pow(2, attempt), RETRY_AFTER_CAP_MS);
+        const remaining = TOTAL_OPERATION_BUDGET_MS - (Date.now() - operationStart);
+        if (backoffMs >= remaining) throw lastError;
+        if (isTimeout) {
+          console.error(`Canvas API timeout: retrying in ${backoffMs}ms (attempt ${attempt + 1}/${CanvasClient.MAX_RETRIES})`);
+        } else {
+          console.error(`Canvas API network error: retrying in ${backoffMs}ms (attempt ${attempt + 1}/${CanvasClient.MAX_RETRIES})`);
+        }
+        await new Promise(resolve => setTimeout(resolve, backoffMs));
       }
     }
 
@@ -283,17 +402,30 @@ export class CanvasClient {
     }
 
     let pageCount = 0;
+    const startEndpoint = endpoint;
 
     while (url) {
       // Guard: max pages
       if (++pageCount > CanvasClient.MAX_PAGES) {
         console.error(`Pagination limit reached (${CanvasClient.MAX_PAGES} pages). Returning partial results.`);
+        this.paginationTruncations.push({
+          endpoint: startEndpoint,
+          reason: 'max_pages',
+          pages: pageCount - 1,
+          items: results.length,
+        });
         break;
       }
 
       // Guard: validate URL origin for followed links
       if (url.startsWith('http') && !this.isAllowedUrl(url)) {
         console.error('Pagination stopped: next page URL does not match Canvas instance origin.');
+        this.paginationTruncations.push({
+          endpoint: startEndpoint,
+          reason: 'origin_mismatch',
+          pages: pageCount - 1,
+          items: results.length,
+        });
         break;
       }
 
@@ -317,6 +449,12 @@ export class CanvasClient {
       // Guard: max items
       if (results.length >= CanvasClient.MAX_PAGINATED_ITEMS) {
         console.error(`Item limit reached (${CanvasClient.MAX_PAGINATED_ITEMS} items). Returning partial results.`);
+        this.paginationTruncations.push({
+          endpoint: startEndpoint,
+          reason: 'max_items',
+          pages: pageCount,
+          items: results.length,
+        });
         break;
       }
 
@@ -369,7 +507,10 @@ export class CanvasClient {
   }
 
   /**
-   * Get all active, available courses. Convenience wrapper for the common pattern.
+   * Get all active, available courses (raw Canvas filter — does NOT
+   * exclude past or future terms). Most callers want getCurrentCourses
+   * instead; keep this for the user-facing list_courses tool where the
+   * caller may explicitly want every enrollment.
    */
   async getActiveCourses(include?: string[]): Promise<Course[]> {
     return this.listCourses({
@@ -380,10 +521,47 @@ export class CanvasClient {
   }
 
   /**
-   * Get context_codes for all active courses (e.g., ["course_123", "course_456"]).
+   * Get courses Theo is actively taking *right now* — filtered to the
+   * current term. Canvas's `enrollment_state: 'active'` does NOT filter
+   * by term dates, so a "completed" 16-week semester whose enrollment
+   * lingers as active will still leak through. We apply an in-memory
+   * term-date filter:
+   *
+   *   - Effective start (term.start_at OR course.start_at): in the past
+   *     OR null.
+   *   - Effective end   (term.end_at   OR course.end_at):   in the future
+   *     OR null.
+   *   - workflow_state is 'available'.
+   *
+   * Also implicitly drops courses missing an active enrollment record.
+   * Always requests `include[]=term` so callers don't have to remember.
+   */
+  async getCurrentCourses(include?: string[]): Promise<Course[]> {
+    const includes = new Set<'term' | 'total_students' | 'syllabus_body' | 'total_scores'>([
+      'term',
+    ]);
+    if (include) {
+      for (const i of include) {
+        if (i === 'term' || i === 'total_students' || i === 'syllabus_body' || i === 'total_scores') {
+          includes.add(i);
+        }
+      }
+    }
+    const all = await this.listCourses({
+      enrollment_state: 'active',
+      state: ['available'],
+      include: Array.from(includes) as ('term' | 'total_students' | 'syllabus_body')[],
+    });
+    const now = new Date();
+    return all.filter((c) => isCurrentTermCourse(c, now));
+  }
+
+  /**
+   * Get context_codes for all currently-enrolled courses
+   * (e.g., ["course_123", "course_456"]).
    */
   async getActiveCourseContextCodes(): Promise<string[]> {
-    const courses = await this.getActiveCourses();
+    const courses = await this.getCurrentCourses();
     return courses.map(c => `course_${c.id}`);
   }
 
@@ -598,22 +776,45 @@ export class CanvasClient {
   }
 
   async downloadFile(downloadUrl: string): Promise<ArrayBuffer> {
-    // Canvas file URLs redirect to pre-signed S3 URLs.
-    // We must NOT send the Bearer token on the redirect.
+    // Canvas file URLs redirect to pre-signed S3 URLs (or its CDN). We must
+    // re-validate every redirect hop so a misconfigured or compromised
+    // upstream cannot redirect us off-allowlist (SSRF). We also must NOT
+    // send the Bearer token to the redirect target — fetch() drops auth
+    // headers on cross-origin redirects, but we issue manually anyway.
     if (!this.isAllowedFileUrl(downloadUrl)) {
       throw new Error(`Download URL rejected: hostname not in allowlist`);
     }
 
-    const response = await fetch(downloadUrl, {
-      redirect: 'follow',
-      signal: this.createTimeoutSignal(60_000), // 60s timeout for file downloads
-    });
-
-    if (!response.ok) {
-      throw new Error(`File download error: ${response.status} ${response.statusText}`);
+    let currentUrl = downloadUrl;
+    const MAX_REDIRECT_HOPS = 5;
+    for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
+      const response = await fetch(currentUrl, {
+        redirect: 'manual',
+        signal: this.createTimeoutSignal(60_000),
+      });
+      // 30x: validate Location and re-issue
+      if (response.status >= 300 && response.status < 400) {
+        const next = response.headers.get('location');
+        if (!next) {
+          throw new Error(`File download error: ${response.status} with no Location header`);
+        }
+        // Resolve relative redirects against the current URL
+        const resolved = new URL(next, currentUrl).toString();
+        if (!this.isAllowedFileUrl(resolved)) {
+          throw new Error(`Download redirect rejected: hostname not in allowlist (${new URL(resolved).hostname})`);
+        }
+        if (hop === MAX_REDIRECT_HOPS) {
+          throw new Error(`File download error: too many redirects (>${MAX_REDIRECT_HOPS})`);
+        }
+        currentUrl = resolved;
+        continue;
+      }
+      if (!response.ok) {
+        throw new Error(`File download error: ${response.status} ${response.statusText}`);
+      }
+      return response.arrayBuffer();
     }
-
-    return response.arrayBuffer();
+    throw new Error('File download error: exhausted redirect budget');
   }
 
   // ==================== PAGES ====================
@@ -747,6 +948,96 @@ export class CanvasClient {
     return this.request<unknown>(
       `/courses/${courseId}/rubrics/${rubricId}${query}`
     );
+  }
+
+  // ==================== LATE POLICY ====================
+
+  /**
+   * Per-course late + missing submission policy. Returns null when the
+   * course has no policy set (older courses, or instructor-disabled).
+   * Some Canvas instances 404 instead of returning null — handle both.
+   */
+  async getLatePolicy(courseId: number): Promise<LatePolicy | null> {
+    try {
+      const wrapped = await this.request<{ late_policy: LatePolicy } | LatePolicy>(
+        `/courses/${courseId}/late_policy`,
+      );
+      // Canvas may return wrapped or unwrapped depending on instance.
+      if (wrapped && typeof wrapped === 'object' && 'late_policy' in wrapped) {
+        return wrapped.late_policy ?? null;
+      }
+      return wrapped as LatePolicy;
+    } catch (err) {
+      // 404 = no policy configured. 403 = student not authorized to read
+      // (some Canvas instances scope this to teachers). Both are "no
+      // policy data available to you" → null. Real auth failures (401)
+      // re-throw so the caller can surface them.
+      if (err instanceof Error && /\b40[34]\b/.test(err.message)) return null;
+      throw err;
+    }
+  }
+
+  // ==================== ANALYTICS ====================
+
+  /**
+   * Per-assignment analytics for the calling user in a course. Some
+   * Canvas instances disable analytics for students — surface as empty
+   * array rather than throwing so daily_briefing doesn't fail.
+   */
+  async getMyAssignmentAnalytics(courseId: number): Promise<StudentAssignmentAnalytics[]> {
+    try {
+      return await this.request<StudentAssignmentAnalytics[]>(
+        `/courses/${courseId}/analytics/users/self/assignments`,
+      );
+    } catch (err) {
+      if (err instanceof Error && /\b40[34]\b/.test(err.message)) return [];
+      throw err;
+    }
+  }
+
+  // ==================== GROUPS ====================
+
+  async listMyGroups(courseId?: number): Promise<Group[]> {
+    if (courseId) {
+      return this.requestPaginated<Group>(`/courses/${courseId}/groups`);
+    }
+    return this.requestPaginated<Group>(`/users/self/groups`);
+  }
+
+  async getGroup(groupId: number, includeUsers = false): Promise<Group> {
+    const query = includeUsers ? this.buildQueryString({ include: ['users'] }) : '';
+    return this.request<Group>(`/groups/${groupId}${query}`);
+  }
+
+  async getGroupMemberships(groupId: number): Promise<GroupMembership[]> {
+    return this.requestPaginated<GroupMembership>(`/groups/${groupId}/memberships`);
+  }
+
+  // ==================== QUIZZES ====================
+
+  async listQuizzes(
+    courseId: number,
+    params: ListQuizzesParams = {},
+  ): Promise<Quiz[]> {
+    const query = this.buildQueryString(params);
+    return this.requestPaginated<Quiz>(`/courses/${courseId}/quizzes${query}`);
+  }
+
+  async getQuiz(courseId: number, quizId: number): Promise<Quiz> {
+    return this.request<Quiz>(`/courses/${courseId}/quizzes/${quizId}`);
+  }
+
+  /**
+   * Fetch the calling user's submission(s) for a quiz. Canvas returns the
+   * shape `{ quiz_submissions: [...] }` — multiple entries when the quiz
+   * allows retakes. We unwrap and return the array as-is so callers can
+   * reason about attempts.
+   */
+  async getMyQuizSubmissions(courseId: number, quizId: number): Promise<QuizSubmission[]> {
+    const wrapped = await this.request<{ quiz_submissions: QuizSubmission[] }>(
+      `/courses/${courseId}/quizzes/${quizId}/submissions/self`,
+    );
+    return wrapped.quiz_submissions ?? [];
   }
 
   // ==================== CALENDAR ====================
@@ -1114,6 +1405,54 @@ export class CanvasClient {
 
 // Singleton instance creator
 let clientInstance: CanvasClient | null = null;
+
+/**
+ * Shared "is this a course Theo is actively taking right now?" predicate.
+ * Used by getCurrentCourses and any tool that needs to filter a
+ * pre-fetched course list to the current academic term.
+ *
+ * Why the strict version:
+ * Canvas's `enrollment_state: 'active'` returns *every* enrolled course
+ * including non-academic sandboxes ("Default Term") and onboarding
+ * modules ("Ongoing", e.g., AlcoholEdu, U Got This). Those terms carry
+ * null start/end dates so a generous filter keeps them. Real registrar
+ * terms always have BOTH start_at and end_at set (UW-Madison: "Spring
+ * 2025-2026" with explicit dates).
+ *
+ * Decision rules (all must pass):
+ *   1. workflow_state === 'available'
+ *   2. Course has a term with BOTH explicit start_at and end_at — this
+ *      is what distinguishes academic semesters from sandboxes
+ *      ("Default Term") and rolling onboarding ("Ongoing")
+ *   3. now is within [term.start_at, term.end_at]
+ *
+ * Falls back to course.start_at / course.end_at only if the course has
+ * NO term object — rare for real academic courses, common for "ongoing"
+ * sandboxes which we want to reject anyway.
+ */
+export function isCurrentTermCourse(course: Course, now: Date = new Date()): boolean {
+  if (course.workflow_state !== 'available') return false;
+
+  // Prefer term dates if present. The presence of BOTH dates is the key
+  // signal that this is a real registrar-managed semester.
+  if (course.term) {
+    const start = course.term.start_at ? new Date(course.term.start_at) : null;
+    const end = course.term.end_at ? new Date(course.term.end_at) : null;
+    if (!start || !end || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+      return false; // Term exists but no real dates — sandbox / onboarding
+    }
+    return start <= now && now <= end;
+  }
+
+  // No term object at all — fall back to course-level dates with the
+  // same strictness (must have both, must span now).
+  const start = course.start_at ? new Date(course.start_at) : null;
+  const end = course.end_at ? new Date(course.end_at) : null;
+  if (!start || !end || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    return false;
+  }
+  return start <= now && now <= end;
+}
 
 export function getCanvasClient(): CanvasClient {
   if (!clientInstance) {

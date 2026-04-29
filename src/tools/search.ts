@@ -196,11 +196,11 @@ export function registerSearchTools(server: McpServer) {
         let courses;
         if (course_ids && course_ids.length > 0) {
           // Fetch actual course names instead of using placeholders
-          const allCourses = await client.getActiveCourses();
+          const allCourses = await client.getCurrentCourses();
           const courseMap = new Map(allCourses.map(c => [c.id, c.name]));
           courses = course_ids.map(id => ({ id, name: courseMap.get(id) ?? `Course ${id}` }));
         } else {
-          const allCourses = await client.getActiveCourses();
+          const allCourses = await client.getCurrentCourses();
           courses = allCourses.map(c => ({ id: c.id, name: c.name }));
         }
 

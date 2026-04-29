@@ -1,5 +1,7 @@
 // Shared utilities for the Canvas MCP server
 
+import nodePath from 'node:path';
+
 /**
  * Parse a PDF buffer into text content.
  * Uses pdf-parse v2 class-based API.
@@ -520,11 +522,100 @@ export function stableStringify(obj: unknown): string {
   });
 }
 
+/**
+ * Path-confinement check that's robust against the classic prefix-matching
+ * bug where `/Users/theo` startsWith-matches `/Users/theoadmin`. Both
+ * arguments must be resolved (no `..`, no `~`) before calling.
+ *
+ * Returns true iff `child` is `parent` itself OR a true descendant of it.
+ */
+/**
+ * Return a filesystem-safe version of a Canvas-supplied filename:
+ *   - takes basename (strips any directory components)
+ *   - replaces path-separator chars with `_`
+ *   - drops null bytes
+ *   - caps the total length at 200 chars (well under POSIX 255-byte limit
+ *     once UTF-8 encoded), preserving the extension when possible
+ *   - falls back to `file_<id>` if the result would be empty
+ */
+export function safeCanvasFilename(rawName: string, fileId: number): string {
+  const stripped = nodePath.basename(rawName).replace(/[/\\]/g, '_').replace(/\0/g, '');
+  const MAX = 200;
+  if (stripped.length === 0) return `file_${fileId}`;
+  if (stripped.length <= MAX) return stripped;
+  const ext = nodePath.extname(stripped);
+  const stem = stripped.slice(0, stripped.length - ext.length);
+  // Reserve room for the extension (cap ext at 16 chars so a hostile
+  // 100-char "extension" can't push us over).
+  const cappedExt = ext.length <= 16 ? ext : '';
+  return stem.slice(0, MAX - cappedExt.length) + cappedExt;
+}
+
+export function isPathInside(child: string, parent: string): boolean {
+  if (!child || !parent) return false;
+  if (child === parent) return true;
+  // Append the platform separator to parent so a sibling like
+  // /Users/theoadmin can't pass when parent is /Users/theo.
+  const parentWithSep = parent.endsWith(nodePath.sep) ? parent : parent + nodePath.sep;
+  return child.startsWith(parentWithSep);
+}
+
 /** Maximum file size for text extraction (25 MB) */
 export const MAX_FILE_SIZE = 25 * 1024 * 1024;
 
 /** Default max characters for text extraction */
 export const DEFAULT_MAX_TEXT_LENGTH = 50000;
+
+/**
+ * Compile a user-supplied pattern string into a RegExp.
+ * Accepts plain text (auto-escaped, case-insensitive) or `/pattern/flags`
+ * delimiter syntax. Always forces `i` so search is case-insensitive by
+ * default; optionally forces `g` for multi-match scans.
+ *
+ * Hardening:
+ *   - Empty / whitespace-only input is rejected (would otherwise compile
+ *     to a tautological zero-width regex matching everything).
+ *   - When the user opts into raw `/regex/` syntax, the source is screened
+ *     for the most common catastrophic-backtracking shapes (nested
+ *     unbounded quantifiers like `(a+)+`, `(a*)*`, `(a|a)*`). V8's regex
+ *     engine is not preemptible from JS, so prevention is the only real
+ *     defense — kill these at compile time.
+ *
+ * Throws a typed error with the pattern label so callers can surface a
+ * friendly message to the LLM instead of a raw RegExp parse error.
+ */
+export function compileUserPattern(input: string, label: string, defaultGlobal = false): RegExp {
+  if (!input || !input.trim()) {
+    throw new Error(`Invalid ${label} pattern: empty or whitespace-only.`);
+  }
+  try {
+    const m = input.match(/^\/(.+)\/([gimuy]*)$/);
+    if (m) {
+      const source = m[1];
+      // Reject obvious catastrophic-backtracking shapes. This is a
+      // heuristic, not a soundness guarantee — but it stops the textbook
+      // ReDoS patterns ((a+)+ / (a*)* / (a|a)*) from reaching V8.
+      const redosShapes: Array<[RegExp, string]> = [
+        [/\([^)]*[+*][^)]*\)\s*[+*]/, 'nested unbounded quantifier ((x+)+ or (x*)*)'],
+        [/\([^)]*\|[^)]*\)\s*[+*]/, 'alternation under unbounded quantifier ((a|b)*)'],
+      ];
+      for (const [shape, why] of redosShapes) {
+        if (shape.test(source)) {
+          throw new Error(`Pattern rejected (${why}); rewrite to avoid catastrophic backtracking.`);
+        }
+      }
+      let flags = m[2];
+      if (!flags.includes('i')) flags += 'i';
+      if (defaultGlobal && !flags.includes('g')) flags += 'g';
+      return new RegExp(source, flags);
+    }
+    const escaped = input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(escaped, defaultGlobal ? 'gi' : 'i');
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new Error(`Invalid ${label} pattern (${reason}). Use plain text or /regex/flags syntax.`);
+  }
+}
 
 /**
  * Run async tasks with a concurrency limit to avoid overwhelming the Canvas API.

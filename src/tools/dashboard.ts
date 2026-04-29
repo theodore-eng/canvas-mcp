@@ -31,12 +31,10 @@ export function registerDashboardTools(server: McpServer) {
         const warnings: string[] = [];
 
         // ===== WAVE 1: Fetch courses, todos, planner items in parallel =====
+        // getCurrentCourses filters out past/future-term enrollments that
+        // Canvas's enrollment_state=active otherwise leaks through.
         const [coursesResult, todosResult, plannerResult] = await Promise.allSettled([
-          client.listCourses({
-            enrollment_state: 'active',
-            state: ['available'],
-            include: ['total_scores', 'term'],
-          }),
+          client.getCurrentCourses(['total_scores']),
           client.getTodoItems(),
           client.listPlannerItems({
             start_date: todayStr,
@@ -119,6 +117,9 @@ export function registerDashboardTools(server: McpServer) {
         // ===== SECTION 3: URGENCY =====
         // Collect all assignments across courses for urgency analysis
         const allAssignments: Array<{
+          assignment_id: number;
+          course_id: number;
+          submission_id: number | null;
           name: string;
           course: string;
           due_at: string | null;
@@ -170,6 +171,9 @@ export function registerDashboardTools(server: McpServer) {
             // Only include upcoming assignments (due in the future or recently overdue, and not yet graded)
             if (dueAt && dueAt >= todayStart && dueAt <= futureDate) {
               allAssignments.push({
+                assignment_id: a.id,
+                course_id: courseData.courseId,
+                submission_id: sub?.id ?? null,
                 name: a.name,
                 course: courseData.courseName,
                 due_at: a.due_at,
@@ -205,6 +209,8 @@ export function registerDashboardTools(server: McpServer) {
 
         // ===== SECTION 4: EXAM ALERTS =====
         const examAlerts: Array<{
+          assignment_id: number;
+          course_id: number;
           name: string;
           course: string;
           due_at: string | null;
@@ -224,6 +230,8 @@ export function registerDashboardTools(server: McpServer) {
             if (isQuizType || nameMatchesExam) {
               const daysUntil = Math.ceil((dueAt.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
               examAlerts.push({
+                assignment_id: a.id,
+                course_id: courseData.courseId,
                 name: a.name,
                 course: courseData.courseName,
                 due_at: a.due_at,
@@ -243,6 +251,8 @@ export function registerDashboardTools(server: McpServer) {
 
         // ===== SECTION 5: TODAY'S EVENTS =====
         const todayEventsFormatted = todayEvents.map(event => ({
+          event_id: event.id,
+          context_code: event.context_code,
           title: event.title,
           type: event.type,
           start_at: event.start_at,
@@ -257,6 +267,9 @@ export function registerDashboardTools(server: McpServer) {
 
         // ===== SECTION 6: ACTION ITEMS (Canvas todo queue) =====
         const actionItems = todos.map(item => ({
+          assignment_id: item.assignment?.id ?? null,
+          quiz_id: item.quiz?.id ?? null,
+          course_id: item.course_id ?? null,
           name: item.assignment?.name ?? item.quiz?.title ?? 'Unknown',
           course: item.context_name,
           due_at: item.assignment?.due_at ?? null,
@@ -277,6 +290,9 @@ export function registerDashboardTools(server: McpServer) {
 
         // ===== SECTION 8: UNTRACKED WORK =====
         const untrackedWork: Array<{
+          module_item_id: number;
+          module_id: number;
+          course_id: number;
           title: string;
           course: string;
           type: string;
@@ -327,6 +343,9 @@ export function registerDashboardTools(server: McpServer) {
               }
 
               untrackedWork.push({
+                module_item_id: item.id,
+                module_id: mod.id,
+                course_id: courseModules.courseId,
                 title: item.title,
                 course: courseModules.courseName,
                 type: itemType,
@@ -347,6 +366,7 @@ export function registerDashboardTools(server: McpServer) {
 
         // ===== SECTION 9: GRADES =====
         const grades: Array<{
+          course_id: number;
           course: string;
           course_code: string;
           current_score: number | null;
@@ -365,6 +385,7 @@ export function registerDashboardTools(server: McpServer) {
           if (currentScore === null) continue;
 
           const gradeEntry: {
+            course_id: number;
             course: string;
             course_code: string;
             current_score: number | null;
@@ -372,6 +393,7 @@ export function registerDashboardTools(server: McpServer) {
             adjusted_score?: number | null;
             grade_alert?: string;
           } = {
+            course_id: c.id,
             course: c.name,
             course_code: c.course_code,
             current_score: currentScore,
@@ -401,23 +423,35 @@ export function registerDashboardTools(server: McpServer) {
         }
 
         // ===== SECTION 10: ANNOUNCEMENTS =====
-        const recentAnnouncements = announcements.slice(0, 5).map(ann => ({
-          title: ann.title,
-          author: ann.user_name,
-          posted_at: ann.posted_at,
-          course: courseNameMap.get(ann.context_code) ?? ann.context_code,
-          preview: stripHtmlTags(ann.message).substring(0, 200),
-        }));
+        const recentAnnouncements = announcements.slice(0, 5).map(ann => {
+          const ctxCourseId = ann.context_code?.startsWith('course_')
+            ? Number(ann.context_code.slice('course_'.length))
+            : null;
+          return {
+            announcement_id: ann.id,
+            course_id: Number.isFinite(ctxCourseId) ? ctxCourseId : null,
+            context_code: ann.context_code,
+            title: ann.title,
+            author: ann.user_name,
+            posted_at: ann.posted_at,
+            course: courseNameMap.get(ann.context_code) ?? ann.context_code,
+            preview: stripHtmlTags(ann.message).substring(0, 200),
+          };
+        });
 
         // ===== SECTION 11: WEEK AHEAD PREVIEW =====
-        const weekAheadPreview: Array<{ date: string; count: number; items: string[] }> = [];
+        const weekAheadPreview: Array<{
+          date: string;
+          count: number;
+          items: Array<{ assignment_id: number; course_id: number; name: string; course: string }>;
+        }> = [];
         for (let i = 0; i < 7; i++) {
           const dayDate = new Date(Date.now() + i * 24 * 60 * 60 * 1000);
           const dayStr = client.getLocalDateString(dayDate);
           const dayStart = new Date(dayStr + 'T00:00:00');
           const dayEnd = new Date(dayStr + 'T23:59:59');
 
-          const dayItems: string[] = [];
+          const dayItems: Array<{ assignment_id: number; course_id: number; name: string; course: string }> = [];
           for (const courseData of assignmentData) {
             for (const a of courseData.assignments) {
               if (!a.published || !a.due_at) continue;
@@ -426,7 +460,12 @@ export function registerDashboardTools(server: McpServer) {
                 const sub = a.submission;
                 const isSubmitted = sub?.workflow_state === 'submitted' || sub?.workflow_state === 'graded';
                 if (!isSubmitted) {
-                  dayItems.push(`${a.name} (${courseData.courseName})`);
+                  dayItems.push({
+                    assignment_id: a.id,
+                    course_id: courseData.courseId,
+                    name: a.name,
+                    course: courseData.courseName,
+                  });
                 }
               }
             }
@@ -439,10 +478,20 @@ export function registerDashboardTools(server: McpServer) {
           });
         }
 
+        // Surface any pagination truncation that happened during this briefing
+        // so the LLM knows the data set may be incomplete.
+        const truncations = client.consumePaginationTruncations();
+        for (const t of truncations) {
+          warnings.push(
+            `Pagination truncated on ${t.endpoint} (${t.reason}, ${t.items} items across ${t.pages} pages). Results may be incomplete; narrow the query or call the underlying tool directly.`,
+          );
+        }
+
         // ===== BUILD FINAL RESPONSE =====
         return formatSuccess({
           date: todayStr,
           warnings: warnings.length > 0 ? warnings : undefined,
+          truncations: truncations.length > 0 ? truncations : undefined,
           urgency,
           exam_alerts: examAlerts,
           todays_events: todayEventsFormatted,

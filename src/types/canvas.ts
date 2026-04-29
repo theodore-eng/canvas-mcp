@@ -161,6 +161,23 @@ export interface Submission {
   submission_comments?: SubmissionComment[];
   attachments?: FileAttachment[];
   url?: string;
+  /**
+   * Populated when the submission is requested with
+   * `include[]=rubric_assessment`. Keys are RubricCriteria.id; values
+   * are the grader's per-criterion verdict.
+   */
+  rubric_assessment?: Record<string, RubricAssessmentEntry>;
+}
+
+export interface RubricAssessmentEntry {
+  /** Points awarded for this criterion. */
+  points?: number;
+  /** Free-form grader comment, if the rubric allows them. */
+  comments?: string;
+  /** ID of the matched RubricRating, if the grader picked a tier. */
+  rating_id?: string;
+  /** Sometimes present in full_rubric_assessment expansion. */
+  description?: string;
 }
 
 export interface SubmissionComment {
@@ -743,5 +760,191 @@ export interface Tab {
   hidden?: boolean;
   visibility?: string;
   url?: string;
+}
+
+// ==================== QUIZZES ====================
+
+/**
+ * A Canvas Quiz. Lives in /courses/:id/quizzes — separate from assignments,
+ * which is why the regular submission-status path can't authoritatively
+ * tell you whether you took a quiz.
+ */
+export interface Quiz {
+  id: number;
+  title: string;
+  html_url: string;
+  mobile_url?: string;
+  description?: string | null;
+  quiz_type: 'practice_quiz' | 'assignment' | 'graded_survey' | 'survey';
+  assignment_group_id?: number | null;
+  /** Set when the quiz publishes a linked Assignment row. */
+  assignment_id?: number | null;
+  time_limit?: number | null;
+  shuffle_answers?: boolean;
+  hide_results?: 'always' | 'until_after_last_attempt' | null;
+  show_correct_answers?: boolean;
+  show_correct_answers_last_attempt?: boolean;
+  show_correct_answers_at?: string | null;
+  hide_correct_answers_at?: string | null;
+  allowed_attempts: number;
+  scoring_policy?: 'keep_highest' | 'keep_latest' | 'keep_average';
+  one_question_at_a_time?: boolean;
+  question_count?: number;
+  points_possible: number | null;
+  cant_go_back?: boolean;
+  access_code?: string | null;
+  ip_filter?: string | null;
+  due_at: string | null;
+  lock_at: string | null;
+  unlock_at: string | null;
+  published: boolean;
+  unpublishable?: boolean;
+  locked_for_user?: boolean;
+  lock_info?: LockInfo;
+  lock_explanation?: string;
+  /** Present on /quizzes/:qid response with include[]=can_unpublish etc. */
+  speedgrader_url?: string;
+  question_types?: string[];
+  has_access_code?: boolean;
+  post_to_sis?: boolean;
+  migration_id?: string;
+  one_time_results?: boolean;
+  only_visible_to_overrides?: boolean;
+  preview_url?: string;
+}
+
+export interface ListQuizzesParams {
+  search_term?: string;
+}
+
+/**
+ * A user's submission record for a single quiz attempt. The workflow_state
+ * here is authoritative for "did I take this quiz?" — bypasses the
+ * indeterminate path in get_my_submission_status.
+ */
+// ==================== LATE POLICY ====================
+
+/**
+ * Per-course late and missing submission policy. Drives the actual point
+ * deductions Canvas applies — separate from the assignment-level "late"
+ * boolean. `late_submission_interval` is "day" or "hour".
+ */
+export interface LatePolicy {
+  id: number;
+  course_id: number;
+  missing_submission_deduction_enabled: boolean;
+  /** Percent of total deducted for missing submissions (e.g., 100 → 0). */
+  missing_submission_deduction: number;
+  late_submission_deduction_enabled: boolean;
+  /** Percent deducted per interval (e.g., 10 → −10%/day). */
+  late_submission_deduction: number;
+  late_submission_interval: 'day' | 'hour';
+  /** Floor — Canvas won't deduct below this percent of total. */
+  late_submission_minimum_percent: number;
+  late_submission_minimum_percent_deducted?: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+// ==================== COURSE ANALYTICS ====================
+
+/**
+ * Per-assignment analytics for the calling student. From
+ * /courses/:id/analytics/users/self/assignments — includes timing,
+ * the submission record, and the score statistics across the cohort.
+ */
+export interface StudentAssignmentAnalytics {
+  assignment_id: number;
+  title: string;
+  points_possible: number;
+  due_at: string | null;
+  unlock_at?: string | null;
+  muted?: boolean;
+  min_score?: number | null;
+  max_score?: number | null;
+  median?: number | null;
+  /** First-quartile / third-quartile score across the cohort. */
+  first_quartile?: number | null;
+  third_quartile?: number | null;
+  module_ids?: number[];
+  /** Status from the student's perspective. */
+  status?: 'on_time' | 'late' | 'missing' | 'floating';
+  excused?: boolean;
+  submission?: {
+    posted_at: string | null;
+    submitted_at: string | null;
+    score: number | null;
+  };
+  /** Days late, if late. */
+  late_days?: number;
+}
+
+// ==================== GROUPS ====================
+
+/**
+ * A Canvas group (subset of a group set). Used for group-submission
+ * assignments — TP2-style. Membership maps Theo to teammates.
+ */
+export interface Group {
+  id: number;
+  name: string;
+  description?: string | null;
+  is_public: boolean;
+  followed_by_user?: boolean;
+  join_level?: 'parent_context_auto_join' | 'parent_context_request' | 'invitation_only';
+  members_count: number;
+  avatar_url?: string | null;
+  context_type: string;
+  course_id?: number;
+  account_id?: number;
+  role?: string | null;
+  group_category_id: number;
+  storage_quota_mb?: number;
+  permissions?: Record<string, boolean>;
+  users?: User[];
+}
+
+export interface GroupMembership {
+  id: number;
+  group_id: number;
+  user_id: number;
+  workflow_state: 'accepted' | 'invited' | 'requested';
+  moderator: boolean;
+  just_created?: boolean;
+  user?: User;
+}
+
+export interface QuizSubmission {
+  id: number;
+  user_id: number;
+  quiz_id: number;
+  attempt: number | null;
+  workflow_state:
+    | 'untaken'
+    | 'pending_review'
+    | 'complete'
+    | 'settings_only'
+    | 'preview';
+  /** Score Canvas counts (per scoring_policy). */
+  kept_score: number | null;
+  /** Score for THIS attempt. */
+  score: number | null;
+  score_before_regrade: number | null;
+  fudge_points: number | null;
+  has_seen_results: boolean;
+  started_at: string | null;
+  finished_at: string | null;
+  end_at: string | null;
+  time_spent: number | null;
+  attempts_left: number;
+  /** Linked Submission record (when quiz publishes as Assignment). */
+  submission_id?: number | null;
+  /** Total points possible at time of submission — handy for percent calcs. */
+  quiz_points_possible: number | null;
+  extra_attempts?: number | null;
+  extra_time?: number | null;
+  manually_unlocked?: boolean;
+  validation_token?: string;
+  overdue_and_needs_submission?: boolean;
 }
 

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getCanvasClient } from '../canvas-client.js';
-import { formatError, formatSuccess, runWithConcurrency } from '../utils.js';
+import { formatError, formatSuccess, runWithConcurrency, isPathInside } from '../utils.js';
 import { setPreference } from '../services/preferences.js';
 import { mkdir } from 'fs/promises';
 import { join } from 'path';
@@ -53,23 +53,12 @@ export function registerSemesterTools(server: McpServer) {
           ? base_path.replace(/^~/, os.homedir())
           : join(os.homedir(), 'Canvas');
         const absoluteBasePath = join(resolvedBasePath); // resolve relative paths
-        if (!absoluteBasePath.startsWith(os.homedir())) {
+        if (!isPathInside(absoluteBasePath, os.homedir())) {
           throw new Error('Path must be under home directory');
         }
 
-        // 2. Get active courses with term info
-        const allCourses = await client.listCourses({
-          enrollment_state: 'active',
-          state: ['available'],
-          include: ['total_scores', 'term'],
-        });
-
-        // 3. Filter to current/future courses (term end date > now, or no term end date)
-        const now = new Date();
-        const courses = allCourses.filter(course => {
-          if (!course.term?.end_at) return true;
-          return new Date(course.term.end_at) > now;
-        });
+        // 2. Get current-term courses (filters out past AND future terms)
+        const courses = await client.getCurrentCourses(['total_scores']);
 
         if (courses.length === 0) {
           return formatSuccess({
@@ -108,7 +97,21 @@ export function registerSemesterTools(server: McpServer) {
 
         for (const course of courses) {
           const folderName = safeFolderName(course.course_code);
-          const courseFolderPath = join(resolvedBasePath, folderName);
+          // Defensive: if course_code sanitizes down to empty (e.g. all
+          // special chars), fall back to the numeric course id so we never
+          // mkdir at the base path root.
+          const safeName = folderName.length > 0 ? folderName : `COURSE-${course.id}`;
+          const courseFolderPath = join(resolvedBasePath, safeName);
+          // Path-confinement check: resolved path must remain inside the base.
+          const { resolve: resolvePath } = await import('path');
+          const resolvedCoursePath = resolvePath(courseFolderPath);
+          const resolvedBase = resolvePath(resolvedBasePath);
+          if (!isPathInside(resolvedCoursePath, resolvedBase)) {
+            folderErrors.push(
+              `Refusing to create course folder outside base path: ${courseFolderPath}`,
+            );
+            continue;
+          }
           const createdSubfolders: string[] = [];
 
           // Create course folder and subfolders
