@@ -56,6 +56,33 @@ export class CanvasClient {
   /** In-memory cache with TTL and LRU eviction */
   private cache = new Map<string, { data: unknown; expiresAt: number }>();
 
+  /**
+   * Structured record of pagination truncation events. Tools can call
+   * consumePaginationTruncations() to surface these to the LLM via warnings.
+   */
+  private paginationTruncations: Array<{
+    endpoint: string;
+    reason: 'max_pages' | 'max_items' | 'origin_mismatch';
+    pages: number;
+    items: number;
+  }> = [];
+
+  /**
+   * Drain and return the structured truncation log accumulated since the last
+   * call. Idempotent across consumers — each gets the events that occurred
+   * during their wave, and the buffer is cleared after read.
+   */
+  public consumePaginationTruncations(): Array<{
+    endpoint: string;
+    reason: 'max_pages' | 'max_items' | 'origin_mismatch';
+    pages: number;
+    items: number;
+  }> {
+    const out = this.paginationTruncations;
+    this.paginationTruncations = [];
+    return out;
+  }
+
   /** Maximum cache entries before LRU eviction */
   private static readonly MAX_CACHE_ENTRIES = 500;
   /** Default cache TTL: 5 minutes */
@@ -98,15 +125,38 @@ export class CanvasClient {
    */
   private isAllowedFileUrl(url: string): boolean {
     try {
-      const hostname = new URL(url).hostname;
+      const parsed = new URL(url);
+      // Reject non-HTTPS upfront (defense-in-depth)
+      if (parsed.protocol !== 'https:') return false;
+      const hostname = parsed.hostname.toLowerCase();
       // Allow Canvas origin
-      if (hostname === new URL(this.baseUrl).hostname) return true;
-      // Allow known S3 patterns used by Canvas/Instructure
-      if (hostname === 'instructure-uploads.s3.amazonaws.com') return true;
-      if (/^[\w.-]+\.s3\.amazonaws\.com$/.test(hostname)) return true;
-      if (/^[\w.-]+\.s3\.[\w-]+\.amazonaws\.com$/.test(hostname)) return true;
+      if (hostname === new URL(this.baseUrl).hostname.toLowerCase()) return true;
       // Allow Instructure CDN domains
-      if (hostname.endsWith('.instructure.com')) return true;
+      if (hostname === 'instructure.com' || hostname.endsWith('.instructure.com')) return true;
+      // S3 hostname must end exactly with one of these suffixes — a label-aware
+      // check, so attacker-controlled `evil.com.s3.amazonaws.com` is rejected.
+      // Strategy: split into labels, verify the trailing labels match the AWS
+      // S3 schema, and that there's at least one bucket label in front.
+      const labels = hostname.split('.');
+      // <bucket>.s3.amazonaws.com (legacy global)
+      if (
+        labels.length >= 4 &&
+        labels[labels.length - 3] === 's3' &&
+        labels[labels.length - 2] === 'amazonaws' &&
+        labels[labels.length - 1] === 'com'
+      ) {
+        return true;
+      }
+      // <bucket>.s3.<region>.amazonaws.com (regional virtual-hosted)
+      // OR  <bucket>.s3-<region>.amazonaws.com (legacy dash form)
+      if (
+        labels.length >= 5 &&
+        (labels[labels.length - 4] === 's3' || labels[labels.length - 4].startsWith('s3-')) &&
+        labels[labels.length - 2] === 'amazonaws' &&
+        labels[labels.length - 1] === 'com'
+      ) {
+        return true;
+      }
       return false;
     } catch {
       return false;
@@ -184,6 +234,14 @@ export class CanvasClient {
   /**
    * Fetch with retry logic for transient errors (429, 5xx).
    * Uses exponential backoff and honors Retry-After header.
+   *
+   * Two abort semantics in play:
+   *   - callerSignal: external timeout/cancellation — re-thrown immediately,
+   *     never retried.
+   *   - per-attempt timeout: created via createTimeoutSignal() — counts as a
+   *     transient network error and IS retried (with backoff).
+   *   - total operation budget: hard ceiling across all attempts; once
+   *     exceeded, no further attempts are made.
    */
   private async fetchWithRetry(
     url: string,
@@ -191,12 +249,25 @@ export class CanvasClient {
     callerSignal?: AbortSignal | null,
   ): Promise<Response> {
     let lastError: Error | null = null;
+    const TOTAL_OPERATION_BUDGET_MS = 90_000; // hard ceiling across retries
+    const operationStart = Date.now();
+    const RETRY_AFTER_CAP_MS = 60_000;
 
     for (let attempt = 0; attempt <= CanvasClient.MAX_RETRIES; attempt++) {
+      // Budget check before each attempt
+      const elapsed = Date.now() - operationStart;
+      if (elapsed >= TOTAL_OPERATION_BUDGET_MS) {
+        throw lastError ?? new Error(
+          `Canvas request exceeded total operation budget (${TOTAL_OPERATION_BUDGET_MS}ms) on ${url}`,
+        );
+      }
+
+      // Per-attempt timeout signal (separate from caller-provided abort)
+      const attemptSignal = callerSignal ?? this.createTimeoutSignal();
       try {
         const response = await fetch(url, {
           ...options,
-          signal: callerSignal ?? this.createTimeoutSignal(),
+          signal: attemptSignal,
         });
 
         // Don't retry on success or non-retryable errors
@@ -205,10 +276,15 @@ export class CanvasClient {
         const isRetryable = response.status === 429 || response.status >= 500;
         if (!isRetryable || attempt === CanvasClient.MAX_RETRIES) {
           const errorBody = await response.text();
-          throw new Error(this.sanitizeErrorMessage(response.status, response.statusText, errorBody));
+          // Tag this as a deliberate non-retryable throw so the catch-block
+          // backoff path skips it and re-throws immediately.
+          const handlerError = new Error(this.sanitizeErrorMessage(response.status, response.statusText, errorBody));
+          (handlerError as Error & { __noRetry?: boolean }).__noRetry = true;
+          throw handlerError;
         }
 
-        // Calculate backoff delay
+        // Calculate backoff delay. Cap Retry-After to prevent a hostile or
+        // misconfigured server from parking the process for hours.
         const retryAfter = response.headers.get('Retry-After');
         let delayMs: number;
         if (retryAfter) {
@@ -217,14 +293,50 @@ export class CanvasClient {
         } else {
           delayMs = 1000 * Math.pow(2, attempt); // 1s, 2s, 4s
         }
+        delayMs = Math.min(delayMs, RETRY_AFTER_CAP_MS);
+
+        // Don't sleep past the operation budget
+        const remaining = TOTAL_OPERATION_BUDGET_MS - (Date.now() - operationStart);
+        if (delayMs >= remaining) {
+          const budgetErr = new Error(
+            `Canvas API ${response.status}: would exceed operation budget while waiting ${delayMs}ms`,
+          );
+          (budgetErr as Error & { __noRetry?: boolean }).__noRetry = true;
+          throw budgetErr;
+        }
 
         console.error(`Canvas API ${response.status}: retrying in ${delayMs}ms (attempt ${attempt + 1}/${CanvasClient.MAX_RETRIES})`);
         await response.text(); // consume body before retry
         await new Promise(resolve => setTimeout(resolve, delayMs));
       } catch (error) {
-        if (error instanceof Error && error.name === 'AbortError') throw error;
+        // Deliberate non-retryable throw from the response-handler path
+        // (HTTP 4xx, MAX_RETRIES exhausted, or budget-would-exceed): escape
+        // the loop immediately. Without this short-circuit a 4xx would be
+        // caught here and retried.
+        if ((error as Error & { __noRetry?: boolean })?.__noRetry) {
+          throw error;
+        }
+        // Caller-provided abort: re-throw immediately, do not retry.
+        if (callerSignal && callerSignal.aborted) {
+          throw error;
+        }
+        // Per-attempt timeout (AbortError from our own signal): treat as
+        // transient and retry with shorter backoff. Network errors get a
+        // tighter schedule than HTTP 5xx — we don't want to compound a
+        // localized network blip with seconds of sleep.
+        const isTimeout = error instanceof Error && error.name === 'AbortError';
         lastError = error instanceof Error ? error : new Error(String(error));
         if (attempt === CanvasClient.MAX_RETRIES) throw lastError;
+        // Network-error backoff: 250ms, 500ms, 1000ms (≤1.75s total).
+        const backoffMs = Math.min(250 * Math.pow(2, attempt), RETRY_AFTER_CAP_MS);
+        const remaining = TOTAL_OPERATION_BUDGET_MS - (Date.now() - operationStart);
+        if (backoffMs >= remaining) throw lastError;
+        if (isTimeout) {
+          console.error(`Canvas API timeout: retrying in ${backoffMs}ms (attempt ${attempt + 1}/${CanvasClient.MAX_RETRIES})`);
+        } else {
+          console.error(`Canvas API network error: retrying in ${backoffMs}ms (attempt ${attempt + 1}/${CanvasClient.MAX_RETRIES})`);
+        }
+        await new Promise(resolve => setTimeout(resolve, backoffMs));
       }
     }
 
@@ -283,17 +395,30 @@ export class CanvasClient {
     }
 
     let pageCount = 0;
+    const startEndpoint = endpoint;
 
     while (url) {
       // Guard: max pages
       if (++pageCount > CanvasClient.MAX_PAGES) {
         console.error(`Pagination limit reached (${CanvasClient.MAX_PAGES} pages). Returning partial results.`);
+        this.paginationTruncations.push({
+          endpoint: startEndpoint,
+          reason: 'max_pages',
+          pages: pageCount - 1,
+          items: results.length,
+        });
         break;
       }
 
       // Guard: validate URL origin for followed links
       if (url.startsWith('http') && !this.isAllowedUrl(url)) {
         console.error('Pagination stopped: next page URL does not match Canvas instance origin.');
+        this.paginationTruncations.push({
+          endpoint: startEndpoint,
+          reason: 'origin_mismatch',
+          pages: pageCount - 1,
+          items: results.length,
+        });
         break;
       }
 
@@ -317,6 +442,12 @@ export class CanvasClient {
       // Guard: max items
       if (results.length >= CanvasClient.MAX_PAGINATED_ITEMS) {
         console.error(`Item limit reached (${CanvasClient.MAX_PAGINATED_ITEMS} items). Returning partial results.`);
+        this.paginationTruncations.push({
+          endpoint: startEndpoint,
+          reason: 'max_items',
+          pages: pageCount,
+          items: results.length,
+        });
         break;
       }
 

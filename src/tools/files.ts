@@ -276,8 +276,8 @@ export function registerFileTools(server: McpServer) {
     'Download a file from Canvas and extract its text content. Supports PDFs, plain text, HTML, CSV, and Markdown files. Use this to read lecture notes, slides, or handouts without having to download them manually.',
     {
       file_id: z.number().int().positive().describe('The Canvas file ID (get this from list_course_files or list_modules)'),
-      max_length: z.number().optional().default(DEFAULT_MAX_TEXT_LENGTH)
-        .describe(`Maximum characters to return (default ${DEFAULT_MAX_TEXT_LENGTH}). Useful for very large files.`),
+      max_length: z.number().int().min(100).max(2_000_000).optional().default(DEFAULT_MAX_TEXT_LENGTH)
+        .describe(`Maximum characters to return (default ${DEFAULT_MAX_TEXT_LENGTH}, hard cap 2,000,000). Useful for very large files.`),
     },
     async ({ file_id, max_length }) => {
       try {

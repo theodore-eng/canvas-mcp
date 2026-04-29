@@ -108,7 +108,21 @@ export function registerSemesterTools(server: McpServer) {
 
         for (const course of courses) {
           const folderName = safeFolderName(course.course_code);
-          const courseFolderPath = join(resolvedBasePath, folderName);
+          // Defensive: if course_code sanitizes down to empty (e.g. all
+          // special chars), fall back to the numeric course id so we never
+          // mkdir at the base path root.
+          const safeName = folderName.length > 0 ? folderName : `COURSE-${course.id}`;
+          const courseFolderPath = join(resolvedBasePath, safeName);
+          // Path-confinement check: resolved path must remain inside the base.
+          const { resolve: resolvePath, sep } = await import('path');
+          const resolvedCoursePath = resolvePath(courseFolderPath);
+          const resolvedBase = resolvePath(resolvedBasePath);
+          if (!(resolvedCoursePath === resolvedBase || resolvedCoursePath.startsWith(resolvedBase + sep))) {
+            folderErrors.push(
+              `Refusing to create course folder outside base path: ${courseFolderPath}`,
+            );
+            continue;
+          }
           const createdSubfolders: string[] = [];
 
           // Create course folder and subfolders
